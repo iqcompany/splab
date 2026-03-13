@@ -191,12 +191,17 @@ def _lastfm_get(method: str, **params) -> dict:
     url = "https://ws.audioscrobbler.com/2.0/?" + urllib.parse.urlencode(params)
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read())
+            raw = resp.read()
+            text = raw.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         if e.code == 429 or "rate" in body.lower() or "retry" in body.lower():
             raise RateLimitError(f"HTTP {e.code}: {body[:200]}")
         raise
+    # レスポンス本文にレート制限メッセージが含まれる場合（JSONパース前にチェック）
+    if "retry will occur after" in text.lower() or "rate limit" in text.lower():
+        raise RateLimitError(text[:200].strip())
+    data = json.loads(text)
     if "error" in data:
         if data.get("error") == 29:
             raise RateLimitError(data.get("message", "Rate limit exceeded"))
