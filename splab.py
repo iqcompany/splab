@@ -174,58 +174,72 @@ def _match_filter(track: dict, rule: dict) -> bool:
 
 # ── Last.fm ───────────────────────────────────────────
 
+_lastfm_blocked = False  # レート制限検知後は全コールをスキップ
+
 
 class RateLimitError(Exception):
     """Last.fm レート制限エラー."""
+    pass
 
-    def is_long_wait(self) -> bool:
-        """Retry が長時間（60秒以上）のレート制限か判定."""
-        import re
-        m = re.search(r"Retry will occur after:\s*(\d+)", str(self))
-        return m is not None and int(m.group(1)) > 60
+
+def _check_rate_limit(text: str):
+    """テキストにレート制限メッセージが含まれていたら RateLimitError を raise."""
+    t = text.lower()
+    if any(kw in t for kw in ("retry will occur after", "rate/request limit", "rate limit exceeded")):
+        global _lastfm_blocked
+        _lastfm_blocked = True
+        raise RateLimitError(text[:200].strip())
 
 
 def _lastfm_get(method: str, **params) -> dict:
     """Last.fm API を呼び出す."""
+    global _lastfm_blocked
+    if _lastfm_blocked:
+        raise RateLimitError("Last.fm is rate limited (cached)")
+
     params.update({"method": method, "api_key": LASTFM_API_KEY, "format": "json"})
     url = "https://ws.audioscrobbler.com/2.0/?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        if e.code == 429 or "rate" in body.lower() or "retry" in body.lower():
-            raise RateLimitError(f"HTTP {e.code}: {body[:200]}")
+        _check_rate_limit(body)
+        if e.code == 429:
+            _lastfm_blocked = True
+            raise RateLimitError(f"HTTP 429: {body[:200]}")
         raise
     except urllib.error.URLError as e:
-        reason = str(e.reason) if hasattr(e, "reason") else str(e)
-        if "rate" in reason.lower() or "retry" in reason.lower():
-            raise RateLimitError(reason)
+        _check_rate_limit(str(e))
         raise
     except Exception as e:
-        msg = str(e)
-        if "rate" in msg.lower() or "retry" in msg.lower():
-            raise RateLimitError(msg)
+        _check_rate_limit(str(e))
         raise
-    # レスポンス本文にレート制限メッセージが含まれる場合（JSONパース前にチェック）
-    if "retry will occur after" in text.lower() or "rate/request limit" in text.lower() or "rate limit" in text.lower():
-        raise RateLimitError(text[:200].strip())
+
+    # レスポンス本文チェック（JSONパース前）
+    _check_rate_limit(text)
+
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        raise RateLimitError(f"Unexpected response: {text[:200].strip()}")
+        # JSONでない応答 → レート制限の可能性大
+        _lastfm_blocked = True
+        raise RateLimitError(f"Non-JSON response: {text[:200].strip()}")
+
+    # JSON内のエラーチェック
     if "error" in data:
-        if data.get("error") == 29:
-            raise RateLimitError(data.get("message", "Rate limit exceeded"))
         msg = data.get("message", "")
-        if "rate" in msg.lower() or "retry" in msg.lower():
-            raise RateLimitError(msg)
-    # JSON内のメッセージフィールドもチェック
-    for key in ("message", "msg", "error"):
-        val = data.get(key, "")
-        if isinstance(val, str) and "retry will occur after" in val.lower():
-            raise RateLimitError(val)
+        if data.get("error") == 29:
+            _lastfm_blocked = True
+            raise RateLimitError(msg or "Rate limit exceeded")
+        _check_rate_limit(msg)
+    # messageフィールドもチェック
+    msg = data.get("message", "")
+    if isinstance(msg, str):
+        _check_rate_limit(msg)
+
     return data
 
 
@@ -314,14 +328,8 @@ def cmd_enrich(args: str):
         if not rate_limited:
             try:
                 tags, playcount = _lastfm_track_info(artist, t["name"])
-            except RateLimitError as e:
-                if e.is_long_wait():
-                    print(f"\n  Last.fm レート制限（長時間）: {e}")
-                    print("  処理を中断します。後で enrich を再実行してください。")
-                    _save_tracks()
-                    return
+            except RateLimitError:
                 print(f"\n  Last.fm レート制限に達しました。残りはスキップします。")
-                rate_limited = True
                 _save_tracks()
                 break
         else:
@@ -703,11 +711,7 @@ def _discover_tracks(args: str):
         try:
             data = _lastfm_get("artist.getTopTracks", artist=artist, limit=10)
             tracks = data.get("toptracks", {}).get("track", [])
-        except RateLimitError as e:
-            if e.is_long_wait():
-                print(f"\n  Last.fm レート制限（長時間）: {e}")
-                print("  コマンドを終了します。")
-                return
+        except RateLimitError:
             print(f"\n  Last.fm レート制限 - Spotify 直接検索に切り替えます")
             # Last.fm が使えない場合は Spotify で検索
             try:
@@ -838,11 +842,7 @@ def _discover_similar(args: str):
             try:
                 data = _lastfm_get("artist.getSimilar", artist=src, limit=10)
                 similar_artists = data.get("similarartists", {}).get("artist", [])
-            except RateLimitError as e:
-                if e.is_long_wait():
-                    print(f"\n  Last.fm レート制限（長時間）: {e}")
-                    print("  コマンドを終了します。")
-                    return
+            except RateLimitError:
                 print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
                 lastfm_ok = False
             except Exception:
@@ -879,11 +879,7 @@ def _discover_similar(args: str):
                 try:
                     td = _lastfm_get("artist.getTopTracks", artist=sa_name, limit=5)
                     tracks = td.get("toptracks", {}).get("track", [])
-                except RateLimitError as e:
-                    if e.is_long_wait():
-                        print(f"\n  Last.fm レート制限（長時間）: {e}")
-                        print("  コマンドを終了します。")
-                        return
+                except RateLimitError:
                     print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
                     lastfm_ok = False
                 except Exception:
@@ -1019,12 +1015,9 @@ def cmd_auto(args: str):
             page = random.randint(1, 3)
             try:
                 lastfm_tracks = _lastfm_tag_tracks(tag, limit=per_tag, page=page)
-            except RateLimitError as e:
-                if e.is_long_wait():
-                    print(f"\n  Last.fm レート制限（長時間）: {e}")
-                    print("  コマンドを終了します。")
-                    return
-                lastfm_tracks = []
+            except RateLimitError:
+                print(f"\n  Last.fm レート制限 - コマンドを終了します。")
+                return
             print(f"    {tag}: Last.fm で {len(lastfm_tracks)} 曲取得")
 
             for lt in lastfm_tracks:
@@ -1043,12 +1036,9 @@ def cmd_auto(args: str):
                         try:
                             info = _lastfm_get("track.getInfo", artist=lt_artist, track=lt_name)
                             lt_tags = [t["name"].lower() for t in info.get("track", {}).get("toptags", {}).get("tag", [])]
-                        except RateLimitError as e:
-                            if e.is_long_wait():
-                                print(f"\n  Last.fm レート制限（長時間）: {e}")
-                                print("  コマンドを終了します。")
-                                return
-                            lt_tags = []
+                        except RateLimitError:
+                            print(f"\n  Last.fm レート制限 - コマンドを終了します。")
+                            return
                         except Exception:
                             lt_tags = []
                         time.sleep(0.1)
