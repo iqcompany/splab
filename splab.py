@@ -211,9 +211,6 @@ def _lastfm_get(method: str, **params) -> dict:
             _lastfm_blocked = True
             raise RateLimitError(f"HTTP 429: {body[:200]}")
         raise
-    except urllib.error.URLError as e:
-        _check_rate_limit(str(e))
-        raise
     except Exception as e:
         _check_rate_limit(str(e))
         raise
@@ -224,9 +221,9 @@ def _lastfm_get(method: str, **params) -> dict:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        # JSONでない応答 → レート制限の可能性大
-        _lastfm_blocked = True
-        raise RateLimitError(f"Non-JSON response: {text[:200].strip()}")
+        # レート制限テキストは _check_rate_limit で既にチェック済み
+        # ここに来るのはレート制限以外の不正レスポンス → 通常エラーとして扱う
+        raise Exception(f"Last.fm returned non-JSON: {text[:100].strip()}")
 
     # JSON内のエラーチェック
     if "error" in data:
