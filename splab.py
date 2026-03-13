@@ -297,11 +297,12 @@ def cmd_enrich(args: str):
                     print("  処理を中断します。後で enrich を再実行してください。")
                     _save_tracks()
                     return
-                print(f"\n  Last.fm レート制限に達しました。残りはタグなしで続行します。")
-                tags, playcount = [], 0
+                print(f"\n  Last.fm レート制限に達しました。残りはスキップします。")
                 rate_limited = True
+                _save_tracks()
+                break
         else:
-            tags, playcount = [], 0
+            break
         t["tags"] = tags
         t["playcount"] = playcount
         enriched += 1
@@ -310,8 +311,7 @@ def cmd_enrich(args: str):
             _save_tracks()  # 50曲ごとに途中保存
             print(f"  {i}/{len(targets)} 処理済み...")
 
-        if not rate_limited:
-            time.sleep(0.2)
+        time.sleep(0.2)
 
     _save_tracks()
     print(f"{enriched} 曲のタグ情報を取得・保存しました。")
