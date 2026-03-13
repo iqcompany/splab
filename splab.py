@@ -1112,7 +1112,16 @@ def cmd_playlists():
         for pl in items:
             count += 1
             owner = (pl.get("owner") or {}).get("display_name") or (pl.get("owner") or {}).get("id", "?")
-            total = (pl.get("tracks") or {}).get("total", "?")
+            tracks_obj = pl.get("tracks")
+            if isinstance(tracks_obj, dict) and tracks_obj.get("total") is not None:
+                total = tracks_obj["total"]
+            else:
+                # total が取得できない場合、プレイリストの曲を直接カウント
+                try:
+                    pl_tracks = sp.playlist_items(pl["id"], fields="total")
+                    total = pl_tracks.get("total", "?")
+                except Exception:
+                    total = "?"
             print(f"  {count:3d}. {pl['name']} ({total} 曲) - by {owner}")
         offset += 50
     print(f"\n合計 {count} プレイリスト")
