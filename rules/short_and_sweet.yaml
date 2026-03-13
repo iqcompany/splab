@@ -1,0 +1,4 @@
+playlist_name: "Short & Sweet"
+description: "3分以下のサクッと聴ける曲"
+type: duration
+max_minutes: 3

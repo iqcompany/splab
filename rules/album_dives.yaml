@@ -1,0 +1,4 @@
+playlist_name: "Album Dives"
+description: "同じアルバムから3曲以上お気に入りしたアルバム"
+type: album_count
+min_album_tracks: 3

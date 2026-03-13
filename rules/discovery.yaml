@@ -1,0 +1,4 @@
+playlist_name: "Discovery"
+description: "まだ1曲だけ - 新規開拓中のアーティスト"
+type: artist_count
+max_artist_tracks: 1

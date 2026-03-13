@@ -1,0 +1,9 @@
+playlist_name: "Auto: Cleaning"
+description: "掃除用 - ポップ・ファンク・ディスコ系の明るい曲"
+tags:
+  - "pop"
+  - "funk"
+  - "disco"
+  - "dance pop"
+tracks_per_tag: 15
+limit: 50

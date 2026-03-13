@@ -1,0 +1,9 @@
+playlist_name: "Auto: Running"
+description: "ランニング用 - EDM・ダンス系の高エネルギー曲"
+tags:
+  - "edm"
+  - "dance"
+  - "electronic"
+  - "workout"
+tracks_per_tag: 15
+limit: 50

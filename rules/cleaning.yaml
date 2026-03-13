@@ -1,0 +1,5 @@
+playlist_name: "Cleaning"
+description: "掃除用 - ポップ・ファンク・ディスコ系の明るい曲"
+tags_include: ["pop", "funk", "disco", "dance pop", "k-pop", "j-pop"]
+min_duration_min: 3
+max_duration_min: 5

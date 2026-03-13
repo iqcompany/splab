@@ -1,0 +1,4 @@
+playlist_name: "Hidden Gems"
+description: "再生回数が少ない隠れた名曲"
+type: artist_count
+max_artist_tracks: 2

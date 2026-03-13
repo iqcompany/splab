@@ -1,0 +1,9 @@
+playlist_name: "Auto: Relax"
+description: "リラックス用 - アコースティック・チル・ジャズ系"
+tags:
+  - "acoustic"
+  - "chill"
+  - "jazz"
+  - "bossa nova"
+tracks_per_tag: 15
+limit: 50

@@ -1,0 +1,4 @@
+playlist_name: "Hits"
+description: "よく聴くアーティストの曲"
+type: artist_count
+min_artist_tracks: 10

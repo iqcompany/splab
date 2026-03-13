@@ -1,0 +1,4 @@
+playlist_name: "Core Favorites"
+description: "お気に入りアーティストの曲"
+type: artist_count
+min_artist_tracks: 3

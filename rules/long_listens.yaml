@@ -1,0 +1,4 @@
+playlist_name: "Long Listens"
+description: "6分以上のじっくり聴ける曲"
+type: duration
+min_minutes: 6
