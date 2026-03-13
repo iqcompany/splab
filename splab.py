@@ -198,16 +198,34 @@ def _lastfm_get(method: str, **params) -> dict:
         if e.code == 429 or "rate" in body.lower() or "retry" in body.lower():
             raise RateLimitError(f"HTTP {e.code}: {body[:200]}")
         raise
+    except urllib.error.URLError as e:
+        reason = str(e.reason) if hasattr(e, "reason") else str(e)
+        if "rate" in reason.lower() or "retry" in reason.lower():
+            raise RateLimitError(reason)
+        raise
+    except Exception as e:
+        msg = str(e)
+        if "rate" in msg.lower() or "retry" in msg.lower():
+            raise RateLimitError(msg)
+        raise
     # レスポンス本文にレート制限メッセージが含まれる場合（JSONパース前にチェック）
-    if "retry will occur after" in text.lower() or "rate limit" in text.lower():
+    if "retry will occur after" in text.lower() or "rate/request limit" in text.lower() or "rate limit" in text.lower():
         raise RateLimitError(text[:200].strip())
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise RateLimitError(f"Unexpected response: {text[:200].strip()}")
     if "error" in data:
         if data.get("error") == 29:
             raise RateLimitError(data.get("message", "Rate limit exceeded"))
         msg = data.get("message", "")
         if "rate" in msg.lower() or "retry" in msg.lower():
             raise RateLimitError(msg)
+    # JSON内のメッセージフィールドもチェック
+    for key in ("message", "msg", "error"):
+        val = data.get(key, "")
+        if isinstance(val, str) and "retry will occur after" in val.lower():
+            raise RateLimitError(val)
     return data
 
 
