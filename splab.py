@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from spotify_client import get_spotify_client
+from spotify_client import get_spotify_client, SpotifyRateLimitError
 
 load_dotenv()
 LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
@@ -958,6 +958,8 @@ def _spotify_search_track(artist: str, track_name: str) -> dict | None:
                 "uri": item["uri"],
                 "duration_ms": item.get("duration_ms", 0),
             }
+    except SpotifyRateLimitError:
+        raise  # 呼び出し元に伝播
     except Exception:
         pass
     return None
@@ -1050,7 +1052,11 @@ def cmd_auto(args: str):
                     continue
 
                 # Spotify で検索
-                track = _spotify_search_track(lt_artist, lt_name)
+                try:
+                    track = _spotify_search_track(lt_artist, lt_name)
+                except SpotifyRateLimitError:
+                    print(f"\n  Spotify レート制限 - コマンドを終了します。")
+                    return
                 if not track or track["id"] in seen:
                     time.sleep(0.1)
                     continue
@@ -1211,6 +1217,9 @@ def main():
         if handler:
             try:
                 handler(args)
+            except SpotifyRateLimitError as e:
+                print(f"\n  Spotify レート制限: {e}")
+                print("  しばらく待ってから再実行してください。")
             except Exception as e:
                 print(f"エラー: {e}")
         else:
