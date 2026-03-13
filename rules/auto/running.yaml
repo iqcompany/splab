@@ -7,3 +7,4 @@ tags:
   - "workout"
 tracks_per_tag: 15
 limit: 50
+exclude_liked: true
