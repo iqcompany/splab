@@ -175,22 +175,47 @@ def _match_filter(track: dict, rule: dict) -> bool:
 # ── Last.fm ───────────────────────────────────────────
 
 
+class RateLimitError(Exception):
+    """Last.fm レート制限エラー."""
+
+    def is_long_wait(self) -> bool:
+        """Retry が長時間（60秒以上）のレート制限か判定."""
+        import re
+        m = re.search(r"Retry will occur after:\s*(\d+)", str(self))
+        return m is not None and int(m.group(1)) > 60
+
+
 def _lastfm_get(method: str, **params) -> dict:
     """Last.fm API を呼び出す."""
     params.update({"method": method, "api_key": LASTFM_API_KEY, "format": "json"})
     url = "https://ws.audioscrobbler.com/2.0/?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=10) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        if e.code == 429 or "rate" in body.lower() or "retry" in body.lower():
+            raise RateLimitError(f"HTTP {e.code}: {body[:200]}")
+        raise
+    if "error" in data:
+        if data.get("error") == 29:
+            raise RateLimitError(data.get("message", "Rate limit exceeded"))
+        msg = data.get("message", "")
+        if "rate" in msg.lower() or "retry" in msg.lower():
+            raise RateLimitError(msg)
+    return data
 
 
 def _lastfm_track_info(artist: str, track: str) -> tuple[list[str], int]:
-    """Last.fm から曲のタグと再生回数を取得."""
+    """Last.fm から曲のタグと再生回数を取得. RateLimitError は呼び出し元に伝播."""
     try:
         data = _lastfm_get("track.getInfo", artist=artist, track=track)
         info = data.get("track", {})
         playcount = int(info.get("playcount", 0))
         tags = [t["name"].lower() for t in info.get("toptags", {}).get("tag", [])]
         return tags, playcount
+    except RateLimitError:
+        raise
     except Exception:
         return [], 0
 
@@ -260,21 +285,38 @@ def cmd_enrich(args: str):
 
     print(f"Last.fm からタグ情報を取得中... ({len(targets)} 曲)")
     enriched = 0
+    rate_limited = False
     for i, t in enumerate(targets, 1):
-        # アーティスト名の最初の1人で検索
         artist = t["artist"].split(", ")[0]
-        tags, playcount = _lastfm_track_info(artist, t["name"])
+        if not rate_limited:
+            try:
+                tags, playcount = _lastfm_track_info(artist, t["name"])
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  処理を中断します。後で enrich を再実行してください。")
+                    _save_tracks()
+                    return
+                print(f"\n  Last.fm レート制限に達しました。残りはスキップします。")
+                rate_limited = True
+                _save_tracks()
+                break
+        else:
+            break
         t["tags"] = tags
         t["playcount"] = playcount
         enriched += 1
 
         if i % 50 == 0 or i == len(targets):
+            _save_tracks()  # 50曲ごとに途中保存
             print(f"  {i}/{len(targets)} 処理済み...")
 
-        time.sleep(0.2)  # レート制限: 5 req/sec
+        time.sleep(0.2)
 
     _save_tracks()
     print(f"{enriched} 曲のタグ情報を取得・保存しました。")
+    if rate_limited:
+        print("  (一部タグ未取得。後で enrich を再実行すると差分取得できます)")
 
     # タグ集計を表示
     tag_count: dict[str, int] = {}
@@ -429,6 +471,15 @@ def cmd_rules():
             limit = rule.get("limit", 50)
             print(f"\n  [{name}] {desc}")
             print(f"    tags: {', '.join(tags)}")
+            if rule.get("tags_exclude"):
+                print(f"    tags_exclude: {', '.join(rule['tags_exclude'])}")
+            if rule.get("artist_exclude"):
+                print(f"    artist_exclude: {', '.join(rule['artist_exclude'])}")
+            if rule.get("exclude_liked"):
+                print(f"    exclude_liked: true")
+            for key in ("min_duration_min", "max_duration_min"):
+                if rule.get(key) is not None:
+                    print(f"    {key}: {rule[key]}")
             print(f"    limit: {limit}")
 
 
@@ -553,11 +604,321 @@ def cmd_apply(args: str):
     print("\nSpotify への反映が完了しました！")
 
 
+def cmd_discover(args: str):
+    """お気に入りアーティストの未発見曲 / 似たアーティストの曲を探す."""
+    ensure_login()
+
+    if not LASTFM_API_KEY:
+        print("LASTFM_API_KEY が .env に設定されていません。")
+        return
+
+    # サブコマンド判定
+    parts = args.strip().split(maxsplit=1) if args else []
+    subcmd = parts[0].lower() if parts else ""
+    sub_args = parts[1] if len(parts) > 1 else ""
+
+    if subcmd == "similar":
+        _discover_similar(sub_args)
+    else:
+        _discover_tracks(args)
+
+
+def _discover_tracks(args: str):
+    """お気に入りアーティストの未発見曲を探す."""
+    if not ensure_liked():
+        return
+
+    # お気に入りアーティストの曲数を集計
+    artist_count: dict[str, int] = {}
+    for t in liked_tracks:
+        for a in t["artist"].split(", "):
+            artist_count[a] = artist_count.get(a, 0) + 1
+
+    # 引数: "3" or "3+" = 3曲以上, "3-" = 3曲以下
+    mode = "min"
+    threshold = 3
+    if args:
+        args = args.strip()
+        if args.endswith("-"):
+            mode = "max"
+            threshold = int(args[:-1])
+        elif args.endswith("+"):
+            threshold = int(args[:-1])
+        else:
+            try:
+                threshold = int(args)
+            except ValueError:
+                threshold = 3
+
+    if mode == "min":
+        target_artists = [a for a, c in sorted(artist_count.items(), key=lambda x: -x[1]) if c >= threshold]
+        label = f"{threshold} 曲以上"
+    else:
+        target_artists = [a for a, c in sorted(artist_count.items(), key=lambda x: -x[1]) if c <= threshold]
+        label = f"{threshold} 曲以下"
+
+    import random
+    # 上限30組（多すぎるとレート制限に引っかかる）
+    max_artists = 30
+    if len(target_artists) > max_artists:
+        print(f"\n対象 {len(target_artists)} 組 → ランダムに {max_artists} 組を選択")
+        target_artists = random.sample(target_artists, max_artists)
+
+    if not target_artists:
+        print(f"お気に入り {label} のアーティストがいません。")
+        return
+
+    print(f"\nお気に入り {label} のアーティスト ({len(target_artists)} 組) の未発見曲を検索中...")
+
+    liked_ids = {t["id"] for t in liked_tracks}
+    liked_keys = {f"{t['artist'].split(', ')[0].lower()}|{t['name'].lower()}" for t in liked_tracks}
+
+    found_tracks = []
+    seen_ids = set()
+
+    for artist in target_artists:
+        try:
+            data = _lastfm_get("artist.getTopTracks", artist=artist, limit=10)
+            tracks = data.get("toptracks", {}).get("track", [])
+        except RateLimitError as e:
+            if e.is_long_wait():
+                print(f"\n  Last.fm レート制限（長時間）: {e}")
+                print("  コマンドを終了します。")
+                return
+            print(f"\n  Last.fm レート制限 - Spotify 直接検索に切り替えます")
+            # Last.fm が使えない場合は Spotify で検索
+            try:
+                results = sp.search(q=f"artist:{artist}", type="track", limit=10)
+                items = results.get("tracks", {}).get("items", [])
+                for item in items:
+                    if item["id"] not in liked_ids and item["id"] not in seen_ids:
+                        seen_ids.add(item["id"])
+                        found_tracks.append({
+                            "id": item["id"],
+                            "name": item["name"],
+                            "artist": ", ".join(a["name"] for a in item["artists"]),
+                            "album": item["album"]["name"],
+                            "uri": item["uri"],
+                            "duration_ms": item.get("duration_ms", 0),
+                        })
+                        time.sleep(0.2)
+            except Exception:
+                pass
+            continue
+        except Exception:
+            tracks = []
+
+        new_count = 0
+        for lt in tracks:
+            lt_name = lt.get("name", "")
+            key = f"{artist.lower()}|{lt_name.lower()}"
+            if key in liked_keys:
+                continue
+
+            track = _spotify_search_track(artist, lt_name)
+            if not track or track["id"] in liked_ids or track["id"] in seen_ids:
+                time.sleep(0.2)
+                continue
+
+            seen_ids.add(track["id"])
+            found_tracks.append(track)
+            new_count += 1
+            time.sleep(0.2)
+
+        if new_count > 0:
+            print(f"    {artist}: {new_count} 曲発見")
+        time.sleep(0.3)  # アーティスト間の間隔
+
+    playlist_name = "Discover: My Artists"
+    generated[playlist_name] = found_tracks
+
+    print(f"\n[{playlist_name}] {len(found_tracks)} 曲が見つかりました。")
+    for i, t in enumerate(found_tracks[:15], 1):
+        _print_track(i, t)
+    if len(found_tracks) > 15:
+        print(f"    ... 他 {len(found_tracks) - 15} 曲")
+    print(f"\napply '{playlist_name}' で Spotify に反映できます。")
+
+
+def _discover_similar(args: str):
+    """似たアーティストの曲を探す."""
+    liked_ids = {t["id"] for t in liked_tracks} if liked_tracks else set()
+
+    # 引数パターン:
+    #   "Muse"     → そのアーティストの類似
+    #   "5"  "5+"  → お気に入り5曲以上のアーティストの類似
+    #   "2-"       → お気に入り2曲以下のアーティストの類似
+    #   (なし)     → お気に入り3曲以上のアーティストの類似
+    args = args.strip() if args else ""
+
+    # 数値パターンか判定
+    is_number = False
+    if args:
+        test = args.rstrip("+-")
+        if test.isdigit():
+            is_number = True
+
+    if args and not is_number:
+        # アーティスト名指定
+        source_artists = [args]
+        playlist_name = f"Similar: {args}"
+    else:
+        if not ensure_liked():
+            return
+        artist_count: dict[str, int] = {}
+        for t in liked_tracks:
+            for a in t["artist"].split(", "):
+                artist_count[a] = artist_count.get(a, 0) + 1
+
+        import random
+        mode = "min"
+        threshold = 3
+        if args:
+            if args.endswith("-"):
+                mode = "max"
+                threshold = int(args[:-1])
+            elif args.endswith("+"):
+                threshold = int(args[:-1])
+            else:
+                threshold = int(args)
+
+        if mode == "min":
+            candidates = [a for a, c in sorted(artist_count.items(), key=lambda x: -x[1]) if c >= threshold]
+            label = f"{threshold} 曲以上"
+        else:
+            candidates = [a for a, c in sorted(artist_count.items(), key=lambda x: -x[1]) if c <= threshold]
+            label = f"{threshold} 曲以下"
+
+        max_artists = 15
+        if len(candidates) > max_artists:
+            source_artists = random.sample(candidates, max_artists)
+            print(f"\n対象 {len(candidates)} 組 → ランダムに {max_artists} 組を選択")
+        else:
+            source_artists = candidates
+
+        playlist_name = f"Discover: Similar ({label})"
+
+    if not source_artists:
+        print("対象アーティストがいません。")
+        return
+
+    found_tracks = []
+    seen_ids = set()
+    seen_similar = set()
+
+    lastfm_ok = True
+    for src in source_artists:
+        print(f"\n  {src} の類似アーティストを検索中...")
+
+        similar_artists = []
+        if lastfm_ok:
+            try:
+                data = _lastfm_get("artist.getSimilar", artist=src, limit=10)
+                similar_artists = data.get("similarartists", {}).get("artist", [])
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  コマンドを終了します。")
+                    return
+                print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
+                lastfm_ok = False
+            except Exception:
+                pass
+
+        if not similar_artists:
+            # Last.fm が使えない場合は Spotify でアーティスト名検索
+            try:
+                results = sp.search(q=f"artist:{src}", type="track", limit=10)
+                for item in results.get("tracks", {}).get("items", []):
+                    if item["id"] not in seen_ids and item["id"] not in liked_ids:
+                        seen_ids.add(item["id"])
+                        found_tracks.append({
+                            "id": item["id"],
+                            "name": item["name"],
+                            "artist": ", ".join(a["name"] for a in item["artists"]),
+                            "album": item["album"]["name"],
+                            "uri": item["uri"],
+                            "duration_ms": item.get("duration_ms", 0),
+                        })
+                        time.sleep(0.2)
+            except Exception:
+                pass
+            continue
+
+        for sa in similar_artists:
+            sa_name = sa.get("name", "")
+            if sa_name.lower() in seen_similar:
+                continue
+            seen_similar.add(sa_name.lower())
+
+            tracks = []
+            if lastfm_ok:
+                try:
+                    td = _lastfm_get("artist.getTopTracks", artist=sa_name, limit=5)
+                    tracks = td.get("toptracks", {}).get("track", [])
+                except RateLimitError as e:
+                    if e.is_long_wait():
+                        print(f"\n  Last.fm レート制限（長時間）: {e}")
+                        print("  コマンドを終了します。")
+                        return
+                    print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
+                    lastfm_ok = False
+                except Exception:
+                    pass
+
+            if not tracks:
+                try:
+                    results = sp.search(q=f"artist:{sa_name}", type="track", limit=5)
+                    for item in results.get("tracks", {}).get("items", []):
+                        if item["id"] not in seen_ids and item["id"] not in liked_ids:
+                            seen_ids.add(item["id"])
+                            found_tracks.append({
+                                "id": item["id"],
+                                "name": item["name"],
+                                "artist": ", ".join(a["name"] for a in item["artists"]),
+                                "album": item["album"]["name"],
+                                "uri": item["uri"],
+                                "duration_ms": item.get("duration_ms", 0),
+                            })
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+                continue
+
+            added = 0
+            for lt in tracks:
+                lt_name = lt.get("name", "")
+                track = _spotify_search_track(sa_name, lt_name)
+                if not track or track["id"] in seen_ids or track["id"] in liked_ids:
+                    time.sleep(0.2)
+                    continue
+
+                seen_ids.add(track["id"])
+                found_tracks.append(track)
+                added += 1
+                time.sleep(0.2)
+
+            if added > 0:
+                print(f"    {sa_name}: {added} 曲")
+            time.sleep(0.3)
+
+    generated[playlist_name] = found_tracks
+
+    print(f"\n[{playlist_name}] {len(found_tracks)} 曲が見つかりました。")
+    for i, t in enumerate(found_tracks[:15], 1):
+        _print_track(i, t)
+    if len(found_tracks) > 15:
+        print(f"    ... 他 {len(found_tracks) - 15} 曲")
+    print(f"\napply '{playlist_name}' で Spotify に反映できます。")
+
+
 def _lastfm_tag_tracks(tag: str, limit: int = 50, page: int = 1) -> list[dict]:
     """Last.fm の tag.getTopTracks で曲一覧を取得."""
     try:
         data = _lastfm_get("tag.getTopTracks", tag=tag, limit=limit, page=page)
         return data.get("tracks", {}).get("track", [])
+    except RateLimitError:
+        raise
     except Exception:
         return []
 
@@ -614,6 +975,16 @@ def cmd_auto(args: str):
         tags = rule.get("tags", rule.get("queries", []))
         per_tag = rule.get("tracks_per_tag", rule.get("tracks_per_query", 20))
         limit = rule.get("limit", 50)
+        exclude_liked = rule.get("exclude_liked", False)
+        min_dur = rule.get("min_duration_min")
+        max_dur = rule.get("max_duration_min")
+        artist_exclude = [a.lower() for a in rule.get("artist_exclude", [])]
+        tags_exclude = [t.lower() for t in rule.get("tags_exclude", [])]
+
+        # exclude_liked 用にお気に入りIDセットを構築
+        liked_ids = set()
+        if exclude_liked and liked_tracks:
+            liked_ids = {t["id"] for t in liked_tracks}
 
         print(f"\n[{name}] Last.fm + Spotify で検索中... ({desc})")
 
@@ -623,7 +994,14 @@ def cmd_auto(args: str):
         for tag in tags:
             # ランダムページで毎回違う結果に
             page = random.randint(1, 3)
-            lastfm_tracks = _lastfm_tag_tracks(tag, limit=per_tag, page=page)
+            try:
+                lastfm_tracks = _lastfm_tag_tracks(tag, limit=per_tag, page=page)
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  コマンドを終了します。")
+                    return
+                lastfm_tracks = []
             print(f"    {tag}: Last.fm で {len(lastfm_tracks)} 曲取得")
 
             for lt in lastfm_tracks:
@@ -634,12 +1012,49 @@ def cmd_auto(args: str):
                     continue
                 seen.add(key)
 
+                # tags_exclude: Last.fm のタグを確認
+                if tags_exclude:
+                    lt_tags = [t["name"].lower() for t in lt.get("tag", [])] if isinstance(lt.get("tag"), list) else []
+                    # tag.getTopTracks にはタグが含まれないので track.getInfo で取得
+                    if not lt_tags:
+                        try:
+                            info = _lastfm_get("track.getInfo", artist=lt_artist, track=lt_name)
+                            lt_tags = [t["name"].lower() for t in info.get("track", {}).get("toptags", {}).get("tag", [])]
+                        except RateLimitError as e:
+                            if e.is_long_wait():
+                                print(f"\n  Last.fm レート制限（長時間）: {e}")
+                                print("  コマンドを終了します。")
+                                return
+                            lt_tags = []
+                        except Exception:
+                            lt_tags = []
+                        time.sleep(0.1)
+                    if any(et in lt_tags for et in tags_exclude):
+                        continue
+
+                # artist_exclude
+                if artist_exclude and any(ex in lt_artist.lower() for ex in artist_exclude):
+                    continue
+
                 # Spotify で検索
                 track = _spotify_search_track(lt_artist, lt_name)
-                if track and track["id"] not in seen:
-                    seen.add(track["id"])
-                    found_tracks.append(track)
+                if not track or track["id"] in seen:
+                    time.sleep(0.1)
+                    continue
+                seen.add(track["id"])
 
+                # exclude_liked
+                if exclude_liked and track["id"] in liked_ids:
+                    continue
+
+                # duration フィルタ
+                dur_m = track["duration_ms"] / 60000
+                if min_dur is not None and dur_m < min_dur:
+                    continue
+                if max_dur is not None and dur_m > max_dur:
+                    continue
+
+                found_tracks.append(track)
                 time.sleep(0.1)  # レート制限
 
                 if len(found_tracks) >= limit:
@@ -696,7 +1111,14 @@ def cmd_help():
 
   rules              ルールファイル一覧と内容
   generate [名/all]  ルールでお気に入りからプレイリスト生成
-  auto [名/all]      Spotify検索で新曲プレイリスト生成
+  auto [名/all]      Last.fm タグ検索で新曲プレイリスト生成
+  discover [N+/N-]   お気に入りアーティストの未発見曲
+  discover similar [アーティスト/N+/N-]
+                     似たアーティストの曲を検索
+                     アーティスト名: そのアーティストの類似
+                     N+ : お気に入りN曲以上のアーティストの類似
+                     N- : お気に入りN曲以下のアーティストの類似
+                     省略時: 3曲以上のアーティストの類似
   preview [名]       生成済みプレイリスト確認
 
   apply [名/all]     Spotify にプレイリスト反映
@@ -719,6 +1141,7 @@ COMMANDS = {
     "rules": lambda a: cmd_rules(),
     "generate": cmd_generate,
     "auto": cmd_auto,
+    "discover": cmd_discover,
     "preview": cmd_preview,
     "apply": cmd_apply,
     "playlists": lambda a: cmd_playlists(),

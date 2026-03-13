@@ -95,6 +95,8 @@ python splab.py
 | `rules` | ルールファイル一覧と内容を表示 |
 | `generate [名/all]` | お気に入りからルールでプレイリスト生成 |
 | `auto [名/all]` | Last.fm タグ検索でプレイリスト生成 |
+| `discover [N+/N-]` | お気に入りアーティストの未発見曲を検索 |
+| `discover similar [アーティスト/N+/N-]` | 似たアーティストの曲を検索 |
 | `preview [名]` | 生成済みプレイリストの全曲を確認 |
 | `apply [名/all]` | Spotify にプレイリスト反映 |
 | `playlists` | Spotify プレイリスト一覧 |
@@ -205,6 +207,11 @@ limit: 50
 | `tags` | Last.fm タグ（ジャンル/ムード）のリスト |
 | `tracks_per_tag` | タグごとの取得曲数（デフォルト 20） |
 | `limit` | プレイリスト最大曲数（デフォルト 50） |
+| `exclude_liked` | true でお気に入り済みの曲を除外 |
+| `min_duration_min` | 最小曲長（分） |
+| `max_duration_min` | 最大曲長（分） |
+| `artist_exclude` | 除外するアーティスト名のリスト |
+| `tags_exclude` | 除外するタグのリスト（Last.fm で確認） |
 
 ------------------------------------------------------------------------
 
@@ -225,6 +232,13 @@ limit: 50
 | short_and_sweet.yaml | Short & Sweet | 3分以下の曲 |
 | long_listens.yaml | Long Listens | 6分以上の曲 |
 | album_dives.yaml | Album Dives | 同アルバムから3曲以上 |
+| chill_rock.yaml | Chill Rock | オルタナ・インディー系ロック（メタル除外） |
+| kpop.yaml | K-POP | K-POP・Korean 系 |
+| electro_pop.yaml | Electro Pop | エレクトロポップ・シンセポップ系 |
+| emo_punk.yaml | Emo & Punk | エモ・パンク・ポップパンク系 |
+| heavy.yaml | Heavy | メタル・ニューメタル・ハードロック系 |
+| hiphop_rnb.yaml | Hip-Hop & R&B | ヒップホップ・R&B・ラップ系 |
+| party.yaml | Party | パーティー・ダンス・ディスコ系 |
 
 ### auto ルール
 
@@ -234,6 +248,37 @@ limit: 50
 | cleaning.yaml | Auto: Cleaning | pop, funk, disco, dance pop |
 | focus.yaml | Auto: Focus | ambient, classical, lo-fi, instrumental |
 | relax.yaml | Auto: Relax | acoustic, chill, jazz, bossa nova |
+
+------------------------------------------------------------------------
+
+## discover コマンド
+
+お気に入りアーティストの未発見曲や、似たアーティストの曲を探すコマンドです。
+Last.fm API を使って類似アーティストを検索し、Spotify で曲を見つけます。
+
+### discover [N+/N-]
+
+お気に入りアーティストの、まだお気に入りに入っていない曲を検索します。
+
+```
+splab> discover          # 3曲以上お気に入りしたアーティスト
+splab> discover 5+       # 5曲以上お気に入りしたアーティスト
+splab> discover 2-       # 2曲以下のアーティスト（新規開拓向き）
+```
+
+### discover similar [アーティスト/N+/N-]
+
+Last.fm の類似アーティスト機能を使って、似たテイストの曲を探します。
+
+```
+splab> discover similar          # 3曲以上のアーティストの類似
+splab> discover similar Muse     # Muse に似たアーティストの曲
+splab> discover similar 5+       # 5曲以上のアーティストの類似
+splab> discover similar 1-       # 1曲以下のアーティストの類似
+```
+
+- 対象アーティストが多い場合、自動的にランダムで最大30組（discover）/ 15組（similar）に絞ります
+- Last.fm のレート制限に達した場合、Spotify 検索にフォールバックします
 
 ------------------------------------------------------------------------
 

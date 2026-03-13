@@ -1,0 +1,5 @@
+playlist_name: "Chill Rock"
+description: "ロックだけど激しすぎない - オルタナ・インディー系"
+tags_include: ["rock", "alternative", "alternative rock", "indie rock", "indie"]
+tags_exclude: ["metal", "nu metal", "metalcore", "hardcore", "screamo"]
+max_duration_min: 6

@@ -1,0 +1,4 @@
+playlist_name: "Party"
+description: "パーティー・ダンス・ディスコ系の盛り上がる曲"
+tags_include: ["party", "dance", "disco", "nu-disco", "house"]
+max_duration_min: 5
