@@ -1117,11 +1117,18 @@ def cmd_playlists():
                 total = tracks_obj["total"]
             else:
                 # total が取得できない場合、プレイリストの曲を直接カウント
+                # spotipy の logger.error 出力を一時的に抑制
+                import logging
+                spotipy_logger = logging.getLogger("spotipy.client")
+                prev_level = spotipy_logger.level
+                spotipy_logger.setLevel(logging.CRITICAL)
                 try:
                     pl_tracks = sp.playlist_items(pl["id"], fields="total")
                     total = pl_tracks.get("total", "?")
                 except Exception:
                     total = "?"
+                finally:
+                    spotipy_logger.setLevel(prev_level)
             print(f"  {count:3d}. {pl['name']} ({total} 曲) - by {owner}")
         offset += 50
     print(f"\n合計 {count} プレイリスト")
