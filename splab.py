@@ -177,7 +177,12 @@ def _match_filter(track: dict, rule: dict) -> bool:
 
 class RateLimitError(Exception):
     """Last.fm レート制限エラー."""
-    pass
+
+    def is_long_wait(self) -> bool:
+        """Retry が長時間（60秒以上）のレート制限か判定."""
+        import re
+        m = re.search(r"Retry will occur after:\s*(\d+)", str(self))
+        return m is not None and int(m.group(1)) > 60
 
 
 def _lastfm_get(method: str, **params) -> dict:
@@ -286,7 +291,12 @@ def cmd_enrich(args: str):
         if not rate_limited:
             try:
                 tags, playcount = _lastfm_track_info(artist, t["name"])
-            except RateLimitError:
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  処理を中断します。後で enrich を再実行してください。")
+                    _save_tracks()
+                    return
                 print(f"\n  Last.fm レート制限に達しました。残りはタグなしで続行します。")
                 tags, playcount = [], 0
                 rate_limited = True
@@ -670,7 +680,11 @@ def _discover_tracks(args: str):
         try:
             data = _lastfm_get("artist.getTopTracks", artist=artist, limit=10)
             tracks = data.get("toptracks", {}).get("track", [])
-        except RateLimitError:
+        except RateLimitError as e:
+            if e.is_long_wait():
+                print(f"\n  Last.fm レート制限（長時間）: {e}")
+                print("  コマンドを終了します。")
+                return
             print(f"\n  Last.fm レート制限 - Spotify 直接検索に切り替えます")
             # Last.fm が使えない場合は Spotify で検索
             try:
@@ -801,7 +815,11 @@ def _discover_similar(args: str):
             try:
                 data = _lastfm_get("artist.getSimilar", artist=src, limit=10)
                 similar_artists = data.get("similarartists", {}).get("artist", [])
-            except RateLimitError:
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  コマンドを終了します。")
+                    return
                 print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
                 lastfm_ok = False
             except Exception:
@@ -838,7 +856,11 @@ def _discover_similar(args: str):
                 try:
                     td = _lastfm_get("artist.getTopTracks", artist=sa_name, limit=5)
                     tracks = td.get("toptracks", {}).get("track", [])
-                except RateLimitError:
+                except RateLimitError as e:
+                    if e.is_long_wait():
+                        print(f"\n  Last.fm レート制限（長時間）: {e}")
+                        print("  コマンドを終了します。")
+                        return
                     print(f"  Last.fm レート制限 - Spotify 検索に切り替えます")
                     lastfm_ok = False
                 except Exception:
@@ -895,6 +917,8 @@ def _lastfm_tag_tracks(tag: str, limit: int = 50, page: int = 1) -> list[dict]:
     try:
         data = _lastfm_get("tag.getTopTracks", tag=tag, limit=limit, page=page)
         return data.get("tracks", {}).get("track", [])
+    except RateLimitError:
+        raise
     except Exception:
         return []
 
@@ -970,7 +994,14 @@ def cmd_auto(args: str):
         for tag in tags:
             # ランダムページで毎回違う結果に
             page = random.randint(1, 3)
-            lastfm_tracks = _lastfm_tag_tracks(tag, limit=per_tag, page=page)
+            try:
+                lastfm_tracks = _lastfm_tag_tracks(tag, limit=per_tag, page=page)
+            except RateLimitError as e:
+                if e.is_long_wait():
+                    print(f"\n  Last.fm レート制限（長時間）: {e}")
+                    print("  コマンドを終了します。")
+                    return
+                lastfm_tracks = []
             print(f"    {tag}: Last.fm で {len(lastfm_tracks)} 曲取得")
 
             for lt in lastfm_tracks:
@@ -986,10 +1017,15 @@ def cmd_auto(args: str):
                     lt_tags = [t["name"].lower() for t in lt.get("tag", [])] if isinstance(lt.get("tag"), list) else []
                     # tag.getTopTracks にはタグが含まれないので track.getInfo で取得
                     if not lt_tags:
-                        _, _ = [], 0
                         try:
                             info = _lastfm_get("track.getInfo", artist=lt_artist, track=lt_name)
                             lt_tags = [t["name"].lower() for t in info.get("track", {}).get("toptags", {}).get("tag", [])]
+                        except RateLimitError as e:
+                            if e.is_long_wait():
+                                print(f"\n  Last.fm レート制限（長時間）: {e}")
+                                print("  コマンドを終了します。")
+                                return
+                            lt_tags = []
                         except Exception:
                             lt_tags = []
                         time.sleep(0.1)
