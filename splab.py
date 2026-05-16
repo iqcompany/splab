@@ -212,6 +212,40 @@ def _match_filter(track: dict, rule: dict) -> bool:
         if track.get("playcount", 0) < rule["min_playcount"]:
             return False
 
+    # added_within_days: お気に入り追加日が N 日以内
+    added_within = rule.get("added_within_days")
+    if added_within is not None:
+        added_at = track.get("added_at", "")
+        if added_at:
+            try:
+                added_dt = datetime.fromisoformat(added_at.replace("Z", "+00:00"))
+                jst = timezone(timedelta(hours=9))
+                now = datetime.now(jst)
+                if (now - added_dt).days > added_within:
+                    return False
+            except (ValueError, TypeError):
+                return False
+        else:
+            return False
+
+    # released_after: リリース日が指定日以降
+    released_after = rule.get("released_after")
+    if released_after is not None:
+        release_date = track.get("release_date", "")
+        if release_date:
+            try:
+                # release_date は "2024-01-15" or "2024-01" or "2024" 形式
+                if len(release_date) == 4:
+                    release_date += "-01-01"
+                elif len(release_date) == 7:
+                    release_date += "-01"
+                if release_date < released_after:
+                    return False
+            except (ValueError, TypeError):
+                return False
+        else:
+            return False
+
     return True
 
 
@@ -323,6 +357,8 @@ def cmd_fetch():
                 "uri": t["uri"],
                 "duration_ms": t.get("duration_ms", 0),
                 "explicit": t.get("explicit", False),
+                "added_at": item.get("added_at", ""),
+                "release_date": t.get("album", {}).get("release_date", ""),
             })
         offset += 50
         print(f"  {len(tracks)} 曲取得済み...")

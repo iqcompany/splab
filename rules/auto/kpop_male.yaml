@@ -1,0 +1,12 @@
+playlist_name: "Auto: K-POP Male"
+description: "男性K-POP・ボーイズグループの曲を自動検索"
+tags:
+  - "k-pop"
+  - "kpop"
+  - "korean pop"
+  - "korean boy group"
+  - "korean hip-hop"
+tracks_per_tag: 20
+limit: 60
+exclude_liked: true
+artist_exclude: ["BLACKPINK", "TWICE", "Red Velvet", "aespa", "IVE", "LE SSERAFIM", "NewJeans", "ITZY", "(G)I-DLE", "MAMAMOO", "Girls' Generation", "NMIXX", "Apink", "fromis_9", "OH MY GIRL", "Loona", "Dreamcatcher", "STAYC", "Kep1er", "VIVIZ", "WJSN", "CLC", "Brave Girls", "Momoland", "Chungha", "Sunmi", "Taeyeon", "IU", "Heize", "BOL4"]
