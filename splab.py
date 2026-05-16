@@ -5,6 +5,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -76,6 +77,48 @@ def _build_stats() -> tuple[dict[str, int], dict[str, list[dict]], list[int]]:
         album_tracks.setdefault(key, []).append(t)
 
     return artist_count, album_tracks
+
+
+# ── プレイリスト名解決 ─────────────────────────────────
+
+_MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def _fetch_user_playlist_names() -> set[str]:
+    """ユーザーの Spotify プレイリスト名一覧を取得."""
+    ensure_login()
+    names = set()
+    offset = 0
+    while True:
+        results = sp.current_user_playlists(limit=50, offset=offset)
+        items = results["items"]
+        if not items:
+            break
+        for pl in items:
+            if pl["owner"]["id"] == user_id:
+                names.add(pl["name"])
+        offset += 50
+    return names
+
+
+def _resolve_playlist_name(base_name: str, existing_names: set[str]) -> str:
+    """既存プレイリストと重複する場合 MMM/YYYY サフィックスを付与."""
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    suffix = f"{_MONTH_NAMES[now.month - 1]}/{now.year}"
+    name_with_suffix = f"{base_name} {suffix}"
+
+    # サフィックス付きが既に存在 → そのまま使う（上書き）
+    if name_with_suffix in existing_names:
+        return name_with_suffix
+
+    # ベース名が既に存在 → サフィックス付きで新規作成
+    if base_name in existing_names:
+        return name_with_suffix
+
+    # 既存なし → サフィックスなし
+    return base_name
 
 
 # ── ルールエンジン ──────────────────────────────────────
@@ -534,10 +577,11 @@ def cmd_generate(args: str):
             print(f"ルール '{args}' が見つかりません。rules コマンドで確認してください。")
             return
 
+    existing_names = _fetch_user_playlist_names()
     artist_count, album_tracks = _build_stats()
 
     for rule in rules:
-        name = rule["playlist_name"]
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
         limit = rule.get("limit")
 
         matched = _apply_rule(rule, artist_count, album_tracks)
@@ -753,7 +797,8 @@ def _discover_tracks(args: str):
             print(f"    {artist}: {new_count} 曲発見")
         time.sleep(0.3)  # アーティスト間の間隔
 
-    playlist_name = "Discover: My Artists"
+    existing_names = _fetch_user_playlist_names()
+    playlist_name = _resolve_playlist_name("Discover: My Artists", existing_names)
     generated[playlist_name] = found_tracks
 
     print(f"\n[{playlist_name}] {len(found_tracks)} 曲が見つかりました。")
@@ -782,10 +827,12 @@ def _discover_similar(args: str):
         if test.isdigit():
             is_number = True
 
+    existing_names = _fetch_user_playlist_names()
+
     if args and not is_number:
         # アーティスト名指定
         source_artists = [args]
-        playlist_name = f"Similar: {args}"
+        playlist_name = _resolve_playlist_name(f"Similar: {args}", existing_names)
     else:
         if not ensure_liked():
             return
@@ -820,7 +867,7 @@ def _discover_similar(args: str):
         else:
             source_artists = candidates
 
-        playlist_name = f"Discover: Similar ({label})"
+        playlist_name = _resolve_playlist_name(f"Discover: Similar ({label})", existing_names)
 
     if not source_artists:
         print("対象アーティストがいません。")
@@ -984,11 +1031,13 @@ def cmd_auto(args: str):
             print(f"ルール '{args}' が見つかりません。")
             return
 
+    existing_names = _fetch_user_playlist_names()
+
     for path in paths:
         with open(path, encoding="utf-8") as f:
             rule = yaml.safe_load(f)
 
-        name = rule["playlist_name"]
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
         desc = rule.get("description", "")
         tags = rule.get("tags", rule.get("queries", []))
         per_tag = rule.get("tracks_per_tag", rule.get("tracks_per_query", 20))
