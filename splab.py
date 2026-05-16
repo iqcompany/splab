@@ -102,23 +102,22 @@ def _fetch_user_playlist_names() -> set[str]:
     return names
 
 
-def _resolve_playlist_name(base_name: str, existing_names: set[str]) -> str:
-    """既存プレイリストと重複する場合 MMM/YYYY サフィックスを付与."""
+def _resolve_playlist_name(base_name: str, existing_names: set[str], is_recent: bool = False) -> str:
+    """プレイリスト名を決定. is_recent=True の場合のみ MMM/YYYY サフィックスを付与."""
+    if not is_recent:
+        return base_name
+
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst)
     suffix = f"{_MONTH_NAMES[now.month - 1]}/{now.year}"
     name_with_suffix = f"{base_name} {suffix}"
+    return name_with_suffix
 
-    # サフィックス付きが既に存在 → そのまま使う（上書き）
-    if name_with_suffix in existing_names:
-        return name_with_suffix
 
-    # ベース名が既に存在 → サフィックス付きで新規作成
-    if base_name in existing_names:
-        return name_with_suffix
-
-    # 既存なし → サフィックスなし
-    return base_name
+def _is_suffixed_name(name: str) -> bool:
+    """プレイリスト名が MMM/YYYY サフィックス付きか判定."""
+    import re
+    return bool(re.search(r" [A-Z]{3}/\d{4}$", name))
 
 
 # ── ルールエンジン ──────────────────────────────────────
@@ -617,7 +616,8 @@ def cmd_generate(args: str):
     artist_count, album_tracks = _build_stats()
 
     for rule in rules:
-        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
+        is_recent = rule.get("released_after") is not None or rule.get("added_within_days") is not None
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names, is_recent=is_recent)
         limit = rule.get("limit")
 
         matched = _apply_rule(rule, artist_count, album_tracks)
@@ -693,27 +693,31 @@ def cmd_apply(args: str):
                 break
 
         if playlist_id:
-            # 既存プレイリストの曲を取得して重複を除外し追記
-            existing_uris = set()
-            offset = 0
-            while True:
-                items_resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100, offset=offset)
-                for item in items_resp.get("items", []):
-                    track = item.get("track")
-                    if track and track.get("uri"):
-                        existing_uris.add(track["uri"])
-                if not items_resp.get("next"):
-                    break
-                offset += 100
+            # MMM/YYYY サフィックス付き（最近の曲系）→ 追記、それ以外 → 上書き
+            if _is_suffixed_name(name):
+                existing_uris = set()
+                offset = 0
+                while True:
+                    items_resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100, offset=offset)
+                    for item in items_resp.get("items", []):
+                        track = item.get("track")
+                        if track and track.get("uri"):
+                            existing_uris.add(track["uri"])
+                    if not items_resp.get("next"):
+                        break
+                    offset += 100
 
-            new_uris = [u for u in uris if u not in existing_uris]
-            if new_uris:
-                for i in range(0, len(new_uris), 100):
-                    sp.playlist_add_items(playlist_id, new_uris[i : i + 100])
-                print(f"  [{name}] {len(new_uris)} 曲を追加しました。(既存 {len(existing_uris)} 曲)")
+                new_uris = [u for u in uris if u not in existing_uris]
+                if new_uris:
+                    for i in range(0, len(new_uris), 100):
+                        sp.playlist_add_items(playlist_id, new_uris[i : i + 100])
+                    print(f"  [{name}] {len(new_uris)} 曲を追加しました。(既存 {len(existing_uris)} 曲)")
+                else:
+                    print(f"  [{name}] 追加する新曲はありません。(既存 {len(existing_uris)} 曲)")
+                continue
             else:
-                print(f"  [{name}] 追加する新曲はありません。(既存 {len(existing_uris)} 曲)")
-            continue
+                sp.playlist_replace_items(playlist_id, [])
+                action = "更新"
         else:
             result = sp._post("me/playlists", payload={
                 "name": name,
@@ -721,11 +725,12 @@ def cmd_apply(args: str):
                 "description": "",
             })
             playlist_id = result["id"]
+            action = "作成"
 
         for i in range(0, len(uris), 100):
             sp.playlist_add_items(playlist_id, uris[i : i + 100])
 
-        print(f"  [{name}] {len(uris)} 曲を作成しました。")
+        print(f"  [{name}] {len(uris)} 曲を{action}しました。")
 
     print("\nSpotify への反映が完了しました！")
 
@@ -851,8 +856,7 @@ def _discover_tracks(args: str):
             print(f"    {artist}: {new_count} 曲発見")
         time.sleep(0.3)  # アーティスト間の間隔
 
-    existing_names = _fetch_user_playlist_names()
-    playlist_name = _resolve_playlist_name("Discover: My Artists", existing_names)
+    playlist_name = "Discover: My Artists"
     generated[playlist_name] = found_tracks
 
     print(f"\n[{playlist_name}] {len(found_tracks)} 曲が見つかりました。")
@@ -881,12 +885,10 @@ def _discover_similar(args: str):
         if test.isdigit():
             is_number = True
 
-    existing_names = _fetch_user_playlist_names()
-
     if args and not is_number:
         # アーティスト名指定
         source_artists = [args]
-        playlist_name = _resolve_playlist_name(f"Similar: {args}", existing_names)
+        playlist_name = f"Similar: {args}"
     else:
         if not ensure_liked():
             return
@@ -921,7 +923,7 @@ def _discover_similar(args: str):
         else:
             source_artists = candidates
 
-        playlist_name = _resolve_playlist_name(f"Discover: Similar ({label})", existing_names)
+        playlist_name = f"Discover: Similar ({label})"
 
     if not source_artists:
         print("対象アーティストがいません。")
@@ -1092,7 +1094,8 @@ def cmd_auto(args: str):
         with open(path, encoding="utf-8") as f:
             rule = yaml.safe_load(f)
 
-        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
+        is_recent = rule.get("released_after") is not None
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names, is_recent=is_recent)
         desc = rule.get("description", "")
         tags = rule.get("tags", rule.get("queries", []))
         per_tag = rule.get("tracks_per_tag", rule.get("tracks_per_query", 20))

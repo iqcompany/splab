@@ -1,0 +1,4 @@
+playlist_name: "Piano"
+description: "ピアノの曲"
+tags_include: ["piano", "solo piano", "classical piano", "jazz piano", "neo-classical"]
+artist_include: ["Ludovico Einaudi", "Yiruma", "Lang Lang", "Nils Frahm", "Ólafur Arnalds", "Chilly Gonzales", "Keith Jarrett", "Bill Evans", "Glenn Gould", "Vladimir Horowitz", "Hélène Grimaud", "坂本龍一", "久石譲", "辻井伸行", "Alice Sara Ott", "Víkingur Ólafsson"]

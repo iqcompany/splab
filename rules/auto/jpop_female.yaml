@@ -1,0 +1,12 @@
+playlist_name: "Auto: J-POP Female"
+description: "女性J-POPアーティストの曲を自動検索"
+tags:
+  - "j-pop"
+  - "jpop"
+  - "japanese pop"
+  - "japanese"
+  - "j-pop female"
+tracks_per_tag: 20
+limit: 60
+exclude_liked: true
+artist_exclude: ["Official髭男dism", "King Gnu", "米津玄師", "back number", "BUMP OF CHICKEN", "Mr.Children", "スピッツ", "サザンオールスターズ", "福山雅治", "星野源", "藤井風", "Vaundy", "RADWIMPS", "ONE OK ROCK", "UVERworld", "L'Arc~en~Ciel", "GLAY", "B'z", "嵐", "EXILE", "DA PUMP", "優里", "菅田将暉", "Creepy Nuts", "SEKAI NO OWARI", "GReeeeN", "コブクロ", "ゆず"]
