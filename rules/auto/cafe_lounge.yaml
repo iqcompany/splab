@@ -1,0 +1,11 @@
+playlist_name: "Auto: Cafe & Lounge"
+description: "カフェ＆ラウンジミュージックを自動検索"
+tags:
+  - "lounge"
+  - "bossa nova"
+  - "smooth jazz"
+  - "easy listening"
+  - "downtempo"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

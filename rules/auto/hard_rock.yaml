@@ -1,0 +1,11 @@
+playlist_name: "Auto: Hard Rock"
+description: "ハードロック・ヘヴィメタル系の曲を自動検索"
+tags:
+  - "hard rock"
+  - "heavy metal"
+  - "metal"
+  - "classic rock"
+  - "thrash metal"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

@@ -1,0 +1,11 @@
+playlist_name: "Auto: A Cappella"
+description: "アカペラ・ボーカルハーモニーの曲を自動検索"
+tags:
+  - "a cappella"
+  - "acappella"
+  - "vocal harmony"
+  - "doo-wop"
+  - "barbershop"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

@@ -1,0 +1,11 @@
+playlist_name: "Auto: Classical"
+description: "クラシック音楽を自動検索"
+tags:
+  - "classical"
+  - "baroque"
+  - "romantic"
+  - "symphony"
+  - "chamber music"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

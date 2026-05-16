@@ -1,0 +1,12 @@
+playlist_name: "Auto: Sleep"
+description: "就寝用の穏やかな曲を自動検索"
+tags:
+  - "sleep"
+  - "ambient"
+  - "meditation"
+  - "relaxation"
+  - "drone"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true
+max_duration_min: 10

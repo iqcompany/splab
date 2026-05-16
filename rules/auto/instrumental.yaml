@@ -1,0 +1,11 @@
+playlist_name: "Auto: Instrumental"
+description: "インストルメンタル曲を自動検索"
+tags:
+  - "instrumental"
+  - "post-rock"
+  - "soundtrack"
+  - "film score"
+  - "orchestral"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

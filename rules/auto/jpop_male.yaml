@@ -1,0 +1,12 @@
+playlist_name: "Auto: J-POP Male"
+description: "男性J-POPアーティストの曲を自動検索"
+tags:
+  - "j-pop"
+  - "jpop"
+  - "japanese pop"
+  - "j-rock"
+  - "japanese rock"
+tracks_per_tag: 20
+limit: 60
+exclude_liked: true
+artist_exclude: ["YOASOBI", "Ado", "milet", "LiSA", "Aimer", "いきものがかり", "宇多田ヒカル", "椎名林檎", "安室奈美恵", "浜崎あゆみ", "倖田來未", "西野カナ", "AI", "JUJU", "Superfly", "中島美嘉", "aiko", "Perfume", "乃木坂46", "AKB48", "きゃりーぱみゅぱみゅ", "MISIA", "新しい学校のリーダーズ", "緑黄色社会", "SHISHAMO", "iri", "あいみょん"]

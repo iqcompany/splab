@@ -1,0 +1,11 @@
+playlist_name: "Auto: Piano"
+description: "ピアノ曲を自動検索"
+tags:
+  - "piano"
+  - "solo piano"
+  - "classical piano"
+  - "jazz piano"
+  - "neo-classical"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true

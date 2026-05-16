@@ -1,0 +1,11 @@
+playlist_name: "Auto: Acoustic"
+description: "アコースティック音楽を自動検索"
+tags:
+  - "acoustic"
+  - "singer-songwriter"
+  - "folk"
+  - "unplugged"
+  - "acoustic guitar"
+tracks_per_tag: 15
+limit: 50
+exclude_liked: true
