@@ -657,8 +657,27 @@ def cmd_apply(args: str):
                 break
 
         if playlist_id:
-            sp.playlist_replace_items(playlist_id, [])
-            action = "更新"
+            # 既存プレイリストの曲を取得して重複を除外し追記
+            existing_uris = set()
+            offset = 0
+            while True:
+                items_resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100, offset=offset)
+                for item in items_resp.get("items", []):
+                    track = item.get("track")
+                    if track and track.get("uri"):
+                        existing_uris.add(track["uri"])
+                if not items_resp.get("next"):
+                    break
+                offset += 100
+
+            new_uris = [u for u in uris if u not in existing_uris]
+            if new_uris:
+                for i in range(0, len(new_uris), 100):
+                    sp.playlist_add_items(playlist_id, new_uris[i : i + 100])
+                print(f"  [{name}] {len(new_uris)} 曲を追加しました。(既存 {len(existing_uris)} 曲)")
+            else:
+                print(f"  [{name}] 追加する新曲はありません。(既存 {len(existing_uris)} 曲)")
+            continue
         else:
             result = sp._post("me/playlists", payload={
                 "name": name,
@@ -666,12 +685,11 @@ def cmd_apply(args: str):
                 "description": "",
             })
             playlist_id = result["id"]
-            action = "作成"
 
         for i in range(0, len(uris), 100):
             sp.playlist_add_items(playlist_id, uris[i : i + 100])
 
-        print(f"  [{name}] {len(uris)} 曲を{action}しました。")
+        print(f"  [{name}] {len(uris)} 曲を作成しました。")
 
     print("\nSpotify への反映が完了しました！")
 
