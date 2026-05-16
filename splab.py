@@ -5,6 +5,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -76,6 +77,48 @@ def _build_stats() -> tuple[dict[str, int], dict[str, list[dict]], list[int]]:
         album_tracks.setdefault(key, []).append(t)
 
     return artist_count, album_tracks
+
+
+# ── プレイリスト名解決 ─────────────────────────────────
+
+_MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def _fetch_user_playlist_names() -> set[str]:
+    """ユーザーの Spotify プレイリスト名一覧を取得."""
+    ensure_login()
+    names = set()
+    offset = 0
+    while True:
+        results = sp.current_user_playlists(limit=50, offset=offset)
+        items = results["items"]
+        if not items:
+            break
+        for pl in items:
+            if pl["owner"]["id"] == user_id:
+                names.add(pl["name"])
+        offset += 50
+    return names
+
+
+def _resolve_playlist_name(base_name: str, existing_names: set[str]) -> str:
+    """既存プレイリストと重複する場合 MMM/YYYY サフィックスを付与."""
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    suffix = f"{_MONTH_NAMES[now.month - 1]}/{now.year}"
+    name_with_suffix = f"{base_name} {suffix}"
+
+    # サフィックス付きが既に存在 → そのまま使う（上書き）
+    if name_with_suffix in existing_names:
+        return name_with_suffix
+
+    # ベース名が既に存在 → サフィックス付きで新規作成
+    if base_name in existing_names:
+        return name_with_suffix
+
+    # 既存なし → サフィックスなし
+    return base_name
 
 
 # ── ルールエンジン ──────────────────────────────────────
@@ -167,6 +210,40 @@ def _match_filter(track: dict, rule: dict) -> bool:
 
     if rule.get("min_playcount") is not None:
         if track.get("playcount", 0) < rule["min_playcount"]:
+            return False
+
+    # added_within_days: お気に入り追加日が N 日以内
+    added_within = rule.get("added_within_days")
+    if added_within is not None:
+        added_at = track.get("added_at", "")
+        if added_at:
+            try:
+                added_dt = datetime.fromisoformat(added_at.replace("Z", "+00:00"))
+                jst = timezone(timedelta(hours=9))
+                now = datetime.now(jst)
+                if (now - added_dt).days > added_within:
+                    return False
+            except (ValueError, TypeError):
+                return False
+        else:
+            return False
+
+    # released_after: リリース日が指定日以降
+    released_after = rule.get("released_after")
+    if released_after is not None:
+        release_date = track.get("release_date", "")
+        if release_date:
+            try:
+                # release_date は "2024-01-15" or "2024-01" or "2024" 形式
+                if len(release_date) == 4:
+                    release_date += "-01-01"
+                elif len(release_date) == 7:
+                    release_date += "-01"
+                if release_date < released_after:
+                    return False
+            except (ValueError, TypeError):
+                return False
+        else:
             return False
 
     return True
@@ -280,6 +357,8 @@ def cmd_fetch():
                 "uri": t["uri"],
                 "duration_ms": t.get("duration_ms", 0),
                 "explicit": t.get("explicit", False),
+                "added_at": item.get("added_at", ""),
+                "release_date": t.get("album", {}).get("release_date", ""),
             })
         offset += 50
         print(f"  {len(tracks)} 曲取得済み...")
@@ -534,10 +613,11 @@ def cmd_generate(args: str):
             print(f"ルール '{args}' が見つかりません。rules コマンドで確認してください。")
             return
 
+    existing_names = _fetch_user_playlist_names()
     artist_count, album_tracks = _build_stats()
 
     for rule in rules:
-        name = rule["playlist_name"]
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
         limit = rule.get("limit")
 
         matched = _apply_rule(rule, artist_count, album_tracks)
@@ -613,8 +693,27 @@ def cmd_apply(args: str):
                 break
 
         if playlist_id:
-            sp.playlist_replace_items(playlist_id, [])
-            action = "更新"
+            # 既存プレイリストの曲を取得して重複を除外し追記
+            existing_uris = set()
+            offset = 0
+            while True:
+                items_resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100, offset=offset)
+                for item in items_resp.get("items", []):
+                    track = item.get("track")
+                    if track and track.get("uri"):
+                        existing_uris.add(track["uri"])
+                if not items_resp.get("next"):
+                    break
+                offset += 100
+
+            new_uris = [u for u in uris if u not in existing_uris]
+            if new_uris:
+                for i in range(0, len(new_uris), 100):
+                    sp.playlist_add_items(playlist_id, new_uris[i : i + 100])
+                print(f"  [{name}] {len(new_uris)} 曲を追加しました。(既存 {len(existing_uris)} 曲)")
+            else:
+                print(f"  [{name}] 追加する新曲はありません。(既存 {len(existing_uris)} 曲)")
+            continue
         else:
             result = sp._post("me/playlists", payload={
                 "name": name,
@@ -622,12 +721,11 @@ def cmd_apply(args: str):
                 "description": "",
             })
             playlist_id = result["id"]
-            action = "作成"
 
         for i in range(0, len(uris), 100):
             sp.playlist_add_items(playlist_id, uris[i : i + 100])
 
-        print(f"  [{name}] {len(uris)} 曲を{action}しました。")
+        print(f"  [{name}] {len(uris)} 曲を作成しました。")
 
     print("\nSpotify への反映が完了しました！")
 
@@ -753,7 +851,8 @@ def _discover_tracks(args: str):
             print(f"    {artist}: {new_count} 曲発見")
         time.sleep(0.3)  # アーティスト間の間隔
 
-    playlist_name = "Discover: My Artists"
+    existing_names = _fetch_user_playlist_names()
+    playlist_name = _resolve_playlist_name("Discover: My Artists", existing_names)
     generated[playlist_name] = found_tracks
 
     print(f"\n[{playlist_name}] {len(found_tracks)} 曲が見つかりました。")
@@ -782,10 +881,12 @@ def _discover_similar(args: str):
         if test.isdigit():
             is_number = True
 
+    existing_names = _fetch_user_playlist_names()
+
     if args and not is_number:
         # アーティスト名指定
         source_artists = [args]
-        playlist_name = f"Similar: {args}"
+        playlist_name = _resolve_playlist_name(f"Similar: {args}", existing_names)
     else:
         if not ensure_liked():
             return
@@ -820,7 +921,7 @@ def _discover_similar(args: str):
         else:
             source_artists = candidates
 
-        playlist_name = f"Discover: Similar ({label})"
+        playlist_name = _resolve_playlist_name(f"Discover: Similar ({label})", existing_names)
 
     if not source_artists:
         print("対象アーティストがいません。")
@@ -954,6 +1055,7 @@ def _spotify_search_track(artist: str, track_name: str) -> dict | None:
                 "album": item["album"]["name"],
                 "uri": item["uri"],
                 "duration_ms": item.get("duration_ms", 0),
+                "release_date": item.get("album", {}).get("release_date", ""),
             }
     except SpotifyRateLimitError:
         raise  # 呼び出し元に伝播
@@ -984,11 +1086,13 @@ def cmd_auto(args: str):
             print(f"ルール '{args}' が見つかりません。")
             return
 
+    existing_names = _fetch_user_playlist_names()
+
     for path in paths:
         with open(path, encoding="utf-8") as f:
             rule = yaml.safe_load(f)
 
-        name = rule["playlist_name"]
+        name = _resolve_playlist_name(rule["playlist_name"], existing_names)
         desc = rule.get("description", "")
         tags = rule.get("tags", rule.get("queries", []))
         per_tag = rule.get("tracks_per_tag", rule.get("tracks_per_query", 20))
@@ -998,6 +1102,7 @@ def cmd_auto(args: str):
         max_dur = rule.get("max_duration_min")
         artist_exclude = [a.lower() for a in rule.get("artist_exclude", [])]
         tags_exclude = [t.lower() for t in rule.get("tags_exclude", [])]
+        released_after = rule.get("released_after")
 
         # exclude_liked 用にお気に入りIDセットを構築
         liked_ids = set()
@@ -1069,6 +1174,19 @@ def cmd_auto(args: str):
                     continue
                 if max_dur is not None and dur_m > max_dur:
                     continue
+
+                # released_after フィルタ
+                if released_after is not None:
+                    rd = track.get("release_date", "")
+                    if rd:
+                        if len(rd) == 4:
+                            rd += "-01-01"
+                        elif len(rd) == 7:
+                            rd += "-01"
+                        if rd < released_after:
+                            continue
+                    else:
+                        continue
 
                 found_tracks.append(track)
                 time.sleep(0.1)  # レート制限

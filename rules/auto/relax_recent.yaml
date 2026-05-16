@@ -1,0 +1,11 @@
+playlist_name: "Auto: Relax (Recent)"
+description: "リラックス用 - 最近リリースされたアコースティック・チル系"
+tags:
+  - "acoustic"
+  - "chill"
+  - "jazz"
+  - "bossa nova"
+tracks_per_tag: 20
+limit: 50
+exclude_liked: true
+released_after: "2024-01-01"
