@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -116,7 +117,6 @@ def _resolve_playlist_name(base_name: str, existing_names: set[str], is_recent: 
 
 def _is_suffixed_name(name: str) -> bool:
     """プレイリスト名が MMM/YYYY サフィックス付きか判定."""
-    import re
     return bool(re.search(r" [A-Z]{3}/\d{4}$", name))
 
 
