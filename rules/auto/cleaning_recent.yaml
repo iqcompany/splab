@@ -1,0 +1,11 @@
+playlist_name: "Auto: Cleaning (Recent)"
+description: "掃除用 - 最近リリースされたポップ・ファンク・ディスコ系"
+tags:
+  - "pop"
+  - "funk"
+  - "disco"
+  - "dance pop"
+tracks_per_tag: 20
+limit: 50
+exclude_liked: true
+released_after: "2024-01-01"

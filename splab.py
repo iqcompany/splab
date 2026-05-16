@@ -1055,6 +1055,7 @@ def _spotify_search_track(artist: str, track_name: str) -> dict | None:
                 "album": item["album"]["name"],
                 "uri": item["uri"],
                 "duration_ms": item.get("duration_ms", 0),
+                "release_date": item.get("album", {}).get("release_date", ""),
             }
     except SpotifyRateLimitError:
         raise  # 呼び出し元に伝播
@@ -1101,6 +1102,7 @@ def cmd_auto(args: str):
         max_dur = rule.get("max_duration_min")
         artist_exclude = [a.lower() for a in rule.get("artist_exclude", [])]
         tags_exclude = [t.lower() for t in rule.get("tags_exclude", [])]
+        released_after = rule.get("released_after")
 
         # exclude_liked 用にお気に入りIDセットを構築
         liked_ids = set()
@@ -1172,6 +1174,19 @@ def cmd_auto(args: str):
                     continue
                 if max_dur is not None and dur_m > max_dur:
                     continue
+
+                # released_after フィルタ
+                if released_after is not None:
+                    rd = track.get("release_date", "")
+                    if rd:
+                        if len(rd) == 4:
+                            rd += "-01-01"
+                        elif len(rd) == 7:
+                            rd += "-01"
+                        if rd < released_after:
+                            continue
+                    else:
+                        continue
 
                 found_tracks.append(track)
                 time.sleep(0.1)  # レート制限

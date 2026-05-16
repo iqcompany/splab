@@ -1,0 +1,11 @@
+playlist_name: "Auto: Running (Recent)"
+description: "ランニング用 - 最近リリースされたEDM・ダンス系"
+tags:
+  - "edm"
+  - "dance"
+  - "electronic"
+  - "workout"
+tracks_per_tag: 20
+limit: 50
+exclude_liked: true
+released_after: "2024-01-01"
