@@ -1302,20 +1302,27 @@ def _enrich_some(tracks: list[dict], limit: int = 60) -> int:
     """タグのない曲だけ、Last.fm からタグを取る（seasonal の雰囲気の判定用）."""
     if not LASTFM_API_KEY:
         return 0
+    by_id = {t["id"]: t for t in liked_tracks}
     n = 0
     for t in [t for t in tracks if "tags" not in t][:limit]:
         try:
             tags, playcount = _lastfm_track_info(seas.primary_artist(t), t["name"])
         except RateLimitError:
             break
-        t["tags"], t["playcount"] = tags, playcount
+        # tracks は pick_favorites のコピーなので、保存する liked_tracks にも書き戻す
+        for target in (t, by_id.get(t["id"])):
+            if target is not None:
+                target["tags"], target["playcount"] = tags, playcount
         n += 1
         time.sleep(0.2)
     return n
 
 
 def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str], n: int) -> list[dict]:
-    """お気に入りにまだ入っていない、おすすめの曲を n 曲探す（Last.fm の類似曲・類似アーティスト）."""
+    """お気に入りにまだ入っていない、おすすめの曲を n 曲探す（Last.fm の類似曲・類似アーティスト）.
+
+    favorites: 似た曲を探す種（プレイリストに入れるお気に入りか、それが空の時はプールの曲）.
+    """
     if n <= 0 or not LASTFM_API_KEY:
         if n > 0:
             print("  LASTFM_API_KEY がないため、おすすめの曲は探せません。")
@@ -1478,7 +1485,9 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
         _save_tracks()
 
     print(f"\n  おすすめの曲を探しています（{size - len(favorites)} 曲。数分かかります）...")
-    recs = _seasonal_recommendations(favorites, artist_set, size - len(favorites))
+    # お気に入りを入れない設定（--fav-ratio 0）でも、プールの曲を種にしておすすめを探す
+    seeds = favorites or seas.pick_favorites(pools, seas.split_quotas(25, SEASONAL_FAV_SPLIT), 25)
+    recs = _seasonal_recommendations(seeds, artist_set, size - len(favorites))
     if len(favorites) + len(recs) < size:
         # おすすめが足りない分は、まだ選んでいないお気に入りで埋める（先頭の選び方は変わらない）
         more = seas.pick_favorites(pools, quotas, size - len(recs))
@@ -1490,7 +1499,7 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
         print("  曲が見つかりませんでした。")
         return 1
 
-    mood, mood_score = seas.detect_mood(favorites)
+    mood, mood_score = seas.detect_mood(favorites or seeds)
     existing = _fetch_own_playlists()
     avoid = set(existing) | {r["name"] for r in runs}
     name = opts["name"] or seas.make_title(season, mood, avoid, seed=f"{skey}-{len(runs)}")
