@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 data/tracks.json
 .cache
+data/seasonal_state.json
+data/seasonal_plan.json
+data/seasonal.log
+.venv
+data/seasonal.lock
+data/*.tmp

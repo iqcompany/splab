@@ -1,8 +1,13 @@
 """SpotifyPlaylistLab - 対話型プレイリスト生成ツール."""
 
 import json
+import math
 import os
+import random
 import re
+import shlex
+import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -12,7 +17,8 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from spotify_client import get_spotify_client, SpotifyRateLimitError
+import seasonal as seas
+from spotify_client import get_spotify_client, has_follow_scope, SpotifyAuthError, SpotifyRateLimitError
 
 load_dotenv()
 LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
@@ -20,6 +26,9 @@ LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
 DATA_DIR = "data"
 DATA_FILE = os.path.join(DATA_DIR, "tracks.json")
 RULES_DIR = "rules"
+SEASONAL_STATE_FILE = os.path.join(DATA_DIR, "seasonal_state.json")
+SEASONAL_PLAN_FILE = os.path.join(DATA_DIR, "seasonal_plan.json")
+SEASONAL_LOCK_FILE = os.path.join(DATA_DIR, "seasonal.lock")
 
 # 状態管理
 sp = None
@@ -31,11 +40,11 @@ generated: dict[str, list[dict]] = {}  # プレイリスト名 -> 曲リスト
 # ── ユーティリティ ──────────────────────────────────────
 
 
-def ensure_login():
+def ensure_login(interactive: bool = True):
     global sp, user_id
     if sp is None:
         print("Spotify にログイン中...")
-        sp = get_spotify_client()
+        sp = get_spotify_client(interactive=interactive)
         user_id = sp.current_user()["id"]
         print(f"ログイン成功: {user_id}")
 
@@ -1218,6 +1227,427 @@ def cmd_auto(args: str):
     print(f"\nプレビュー完了。apply コマンドで Spotify に反映できます。")
 
 
+# ── seasonal（季節ごとの詩的なプレイリスト） ─────────────
+
+SEASONAL_DEFAULTS = {
+    "size": 100,          # 全体の曲数
+    "fav_ratio": 0.5,     # お気に入りの割合（残りはおすすめ）
+    "days": 90,           # 「最近追加」「最近フォロー」の期間（前回の実行があればそこから）
+    "release_days": 180,  # 「最近リリース」の期間
+}
+# お気に入りの内訳（合計 1.0）
+SEASONAL_FAV_SPLIT = {"added": 0.4, "released": 0.3, "followed": 0.3}
+SOURCE_JA = {"added": "最近追加", "released": "最近リリース", "followed": "最近フォロー",
+             "rec": "おすすめ"}
+
+
+def _load_json(path: str, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _save_json(path: str, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # 一時ファイルはプロセスごとに別の名前にして、保存が重なっても壊れないようにする
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
+                               dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def _try_lock(f) -> bool:
+    """ファイルを、ほかのプロセスと重ならないようロックする（取れなければ False）. Windows でも動く."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _playlist_uris(playlist_id: str) -> set[str]:
+    """プレイリストに入っている曲の URI（全件）."""
+    uris = set()
+    resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100)
+    while resp:
+        for item in resp.get("items", []):
+            track = item.get("track") or {}
+            if track.get("uri"):
+                uris.add(track["uri"])
+        resp = sp.next(resp) if resp.get("next") else None
+    return uris
+
+
+def _finish_seasonal_run(run: dict, state: dict):
+    """作成中（status=creating）の実行の、まだ入っていない曲を追加して完了にする（途中で失敗しても再開できる）."""
+    have = _playlist_uris(run["playlist_id"])
+    missing = [u for u in run.get("uris", []) if u not in have]
+    for i in range(0, len(missing), 100):
+        sp.playlist_add_items(run["playlist_id"], missing[i:i + 100])
+    run["status"] = "done"
+    run.pop("uris", None)
+    _save_json(SEASONAL_STATE_FILE, state)
+    return len(missing)
+
+
+def _fetch_own_playlists() -> dict[str, str]:
+    """自分が持っているプレイリストを全件（ページングして）取る. {名前: ID}."""
+    ensure_login()
+    out: dict[str, str] = {}
+    results = sp.current_user_playlists(limit=50)
+    while results:
+        for pl in results.get("items", []):
+            if pl and (pl.get("owner") or {}).get("id") == user_id:
+                out.setdefault(pl["name"], pl["id"])
+        results = sp.next(results) if results.get("next") else None
+    return out
+
+
+def _fetch_followed_artists() -> list[dict] | None:
+    """フォロー中のアーティストを全件取る. スコープがなければ None."""
+    if not has_follow_scope():
+        return None
+    ensure_login()
+    out = []
+    try:
+        results = sp.current_user_followed_artists(limit=50)
+        while True:
+            artists = results.get("artists", {})
+            out += [{"id": a["id"], "name": a["name"]} for a in artists.get("items", [])]
+            after = (artists.get("cursors") or {}).get("after")
+            if not artists.get("next") or not after:
+                break
+            results = sp.current_user_followed_artists(limit=50, after=after)
+    except SpotifyRateLimitError:
+        raise
+    except Exception as e:
+        print(f"  フォロー一覧を取れませんでした（{e}）。代わりの方法で判定します。")
+        return None
+    return out
+
+
+def _refresh_liked():
+    """お気に入りを取り直す（Last.fm のタグ・再生回数は前のデータから引き継ぐ）."""
+    global liked_tracks
+    old = {t["id"]: t for t in liked_tracks}
+    cmd_fetch()
+    for t in liked_tracks:
+        prev = old.get(t["id"])
+        if prev:
+            for k in ("tags", "playcount"):
+                if k in prev:
+                    t[k] = prev[k]
+    _save_tracks()
+
+
+def _enrich_some(tracks: list[dict], limit: int = 60) -> int:
+    """タグのない曲だけ、Last.fm からタグを取る（seasonal の雰囲気の判定用）."""
+    if not LASTFM_API_KEY:
+        return 0
+    by_id = {t["id"]: t for t in liked_tracks}
+    n = 0
+    for t in [t for t in tracks if "tags" not in t][:limit]:
+        try:
+            tags, playcount = _lastfm_track_info(seas.primary_artist(t), t["name"])
+        except RateLimitError:
+            break
+        # tracks は pick_favorites のコピーなので、保存する liked_tracks にも書き戻す
+        for target in (t, by_id.get(t["id"])):
+            if target is not None:
+                target["tags"], target["playcount"] = tags, playcount
+        n += 1
+        time.sleep(0.2)
+    return n
+
+
+def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str], n: int) -> list[dict]:
+    """お気に入りにまだ入っていない、おすすめの曲を n 曲探す（Last.fm の類似曲・類似アーティスト）.
+
+    favorites: 似た曲を探す種（プレイリストに入れるお気に入りか、それが空の時はプールの曲）.
+    """
+    if n <= 0 or not LASTFM_API_KEY:
+        if n > 0:
+            print("  LASTFM_API_KEY がないため、おすすめの曲は探せません。")
+        return []
+    liked_ids = {t["id"] for t in liked_tracks}
+    liked_keys = {seas.track_key(seas.primary_artist(t), t["name"]) for t in liked_tracks}
+    cands: dict[str, dict] = {}
+
+    def add(artist: str, name: str, score: float, source: str):
+        if not artist or not name:
+            return
+        k = seas.track_key(artist, name)
+        c = cands.setdefault(k, {"artist": artist, "name": name, "score": 0.0, "why": source})
+        c["score"] += score
+
+    try:
+        # 1) 最近フォローした（好きになった）アーティストの人気曲で、まだお気に入りにないもの
+        for artist in list(followed_artists)[:15]:
+            data = _lastfm_get("artist.getTopTracks", artist=artist, limit=8)
+            for rank, lt in enumerate(data.get("toptracks", {}).get("track", [])):
+                add(artist, lt.get("name", ""), 1.5 - rank * 0.1, f"{artist} の人気曲")
+            time.sleep(0.2)
+
+        # 2) 選んだお気に入りの、似ている曲
+        seeds = favorites[:]
+        random.Random(len(seeds)).shuffle(seeds)
+        for t in seeds[:25]:
+            data = _lastfm_get("track.getSimilar", artist=seas.primary_artist(t), track=t["name"], limit=15)
+            for lt in data.get("similartracks", {}).get("track", []):
+                a = (lt.get("artist") or {}).get("name", "")
+                add(a, lt.get("name", ""), float(lt.get("match", 0) or 0), f"{t['name']} に似た曲")
+            time.sleep(0.2)
+
+        # 3) 足りなければ、似ているアーティストの人気曲
+        if len(seas.rank_candidates(cands, liked_keys)) < n * 2:
+            seed_artists = list(dict.fromkeys(seas.primary_artist(t) for t in seeds))[:10]
+            for artist in seed_artists:
+                data = _lastfm_get("artist.getSimilar", artist=artist, limit=6)
+                for sa in data.get("similarartists", {}).get("artist", []):
+                    sa_name = sa.get("name", "")
+                    td = _lastfm_get("artist.getTopTracks", artist=sa_name, limit=3)
+                    for lt in td.get("toptracks", {}).get("track", []):
+                        add(sa_name, lt.get("name", ""), 0.5 * float(sa.get("match", 0) or 0),
+                            f"{artist} に似たアーティスト")
+                    time.sleep(0.2)
+    except RateLimitError:
+        print("  Last.fm のレート制限に達したので、ここまでの候補で選びます。")
+
+    ranked = seas.rank_candidates(cands, liked_keys)
+    print(f"  おすすめの候補: {len(ranked)} 曲 → Spotify で探します")
+    out, seen = [], set()
+    for c in ranked:
+        if len(out) >= n:
+            break
+        track = _spotify_search_track(c["artist"], c["name"])
+        time.sleep(0.15)
+        if not track or track["id"] in liked_ids or track["id"] in seen:
+            continue
+        if seas.track_key(seas.primary_artist(track), track["name"]) in liked_keys:
+            continue
+        seen.add(track["id"])
+        out.append({**track, "_source": "rec", "_why": c["why"]})
+    return out
+
+
+def _parse_seasonal_args(args: str) -> dict:
+    opts = dict(SEASONAL_DEFAULTS, yes=False, dry_run=False, force=False, fetch=True, name=None)
+    toks = shlex.split(args or "")
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        val = toks[i + 1] if i + 1 < len(toks) else None
+        if tok in ("--yes", "-y"):
+            opts["yes"] = True
+        elif tok == "--dry-run":
+            opts["dry_run"] = True
+        elif tok == "--force":
+            opts["force"] = True
+        elif tok == "--no-fetch":
+            opts["fetch"] = False
+        elif tok in ("--size", "--days", "--release-days") and val is not None:
+            opts[tok[2:].replace("-", "_")] = int(val)
+            i += 1
+        elif tok == "--fav-ratio" and val is not None:
+            opts["fav_ratio"] = float(val)
+            i += 1
+        elif tok == "--name" and val is not None:
+            opts["name"] = val
+            i += 1
+        else:
+            raise ValueError(f"seasonal: 分からないオプション: {tok}")
+        i += 1
+    if not 1 <= opts["size"] <= 1000:
+        raise ValueError("seasonal: --size は 1〜1000 にしてください")
+    if not (math.isfinite(opts["fav_ratio"]) and 0 <= opts["fav_ratio"] <= 1):
+        raise ValueError("seasonal: --fav-ratio は 0〜1 にしてください")
+    if not 1 <= opts["days"] <= 3650 or not 1 <= opts["release_days"] <= 3650:
+        raise ValueError("seasonal: --days と --release-days は 1〜3650 にしてください")
+    return opts
+
+
+def cmd_seasonal(args: str, interactive: bool = True) -> int:
+    """季節ごとの詩的なプレイリストを作る. 戻り値は終了コード（0: 成功・スキップ, 1: 失敗）.
+
+    cron と手動の実行が重ならないよう、終わるまで data/seasonal.lock をロックする。
+    """
+    opts = _parse_seasonal_args(args)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(SEASONAL_LOCK_FILE, "w") as lock:
+        if not _try_lock(lock):
+            print("  別の seasonal が実行中です。終わってからもう一度実行してください。")
+            return 1
+        return _seasonal_locked(opts, interactive)
+
+
+def _seasonal_locked(opts: dict, interactive: bool) -> int:
+    now = datetime.now(seas.JST)
+    today = now.date()
+    skey = seas.season_key(today)
+    season = seas.season_of(today)
+    print(f"[seasonal] {now:%Y-%m-%d %H:%M} JST  季節: {seas.SEASON_JA[season]}（{skey}）")
+
+    state = _load_json(SEASONAL_STATE_FILE, {})
+    runs = state.get("runs", [])
+    last = runs[-1] if runs else None
+    if last and last.get("status") == "creating":
+        # 前回、プレイリストを作ったあと曲の追加の途中で止まった → 続きから
+        if opts["dry_run"]:
+            print(f"  注意: 「{last['name']}」は曲の追加の途中で止まっています（--dry-run なので再開しません）。")
+        else:
+            ensure_login(interactive=interactive)
+            n = _finish_seasonal_run(last, state)
+            print(f"  途中で止まっていた「{last['name']}」に {n} 曲を追加して、完了にしました。")
+            if last.get("season_key") == skey and not opts["force"]:
+                return 0
+    if last and last.get("season_key") == skey and not opts["force"]:
+        msg = f"この季節（{skey}）は {last['date']} に「{last['name']}」を作成済みです。"
+        if not opts["dry_run"]:
+            print(f"  {msg} スキップします（もう1つ作るなら --force）。")
+            return 0
+        print(f"  注意: {msg}（--dry-run なので一覧だけ作ります）")
+
+    ensure_login(interactive=interactive)
+    if opts["fetch"]:
+        _refresh_liked()
+    elif not liked_tracks:
+        cmd_load()
+    if not ensure_liked():
+        return 1
+
+    # 期間: 前回の実行日から（なければ days 日前から）。前回が古すぎる時は days*2 日前までに抑える
+    since_dt = now - timedelta(days=opts["days"])
+    if last:
+        # 前回の実行の時刻（古い記録は日付だけなので、その日の 0 時 JST）
+        last_dt = seas.parse_seen(last.get("at") or last["date"])
+        since_dt = max(last_dt, now - timedelta(days=opts["days"] * 2))
+    release_since = today - timedelta(days=opts["release_days"])
+
+    # 3. 最近フォローしたアーティスト
+    followed = _fetch_followed_artists()
+    if followed is not None:
+        # 記録を始めた日（followed_since）があれば、フォローが0組でも初回ではない
+        first_run = "followed_since" not in state
+        state["followed"] = seas.update_follow_state(state.get("followed", {}), followed, now.isoformat(),
+                                                     first_run=first_run)
+        state.setdefault("followed_since", today.isoformat())
+        recent_follow = seas.recently_followed(state["followed"], since_dt)
+        print(f"  フォロー中 {len(followed)} 組（記録を始めてから新しくフォロー: {len(recent_follow)} 組）")
+        if not opts["dry_run"] or not runs:
+            # フォロー一覧の記録は早く始めるほど正確になるので、初回は dry-run でも残す
+            _save_json(SEASONAL_STATE_FILE, state)
+    else:
+        recent_follow = set()
+        print("  フォロー一覧は使いません（user-follow-read がない。python splab.py login で追加できます）")
+    new_artists = seas.newly_loved_artists(liked_tracks, since_dt)
+    artist_set = recent_follow | new_artists
+
+    pools = {
+        "added": seas.recent_added(liked_tracks, since_dt),
+        "released": seas.recent_released(liked_tracks, release_since),
+        "followed": seas.by_artists(liked_tracks, artist_set),
+    }
+    print(f"  期間: 追加・フォロー {since_dt:%Y-%m-%d} 以降 / リリース {release_since} 以降")
+    print(f"  候補: 最近追加 {len(pools['added'])} 曲 / 最近リリース {len(pools['released'])} 曲 / "
+          f"最近フォロー・好きになったアーティスト {len(artist_set)} 組・{len(pools['followed'])} 曲")
+
+    size = opts["size"]
+    n_fav = round(size * opts["fav_ratio"])
+    quotas = seas.split_quotas(n_fav, SEASONAL_FAV_SPLIT)
+    favorites = seas.pick_favorites(pools, quotas, n_fav)
+
+    if _enrich_some(favorites) and not opts["dry_run"]:
+        _save_tracks()
+
+    print(f"\n  おすすめの曲を探しています（{size - len(favorites)} 曲。数分かかります）...")
+    # お気に入りを入れない設定（--fav-ratio 0）でも、プールの曲を種にしておすすめを探す
+    seeds = favorites or seas.pick_favorites(pools, seas.split_quotas(25, SEASONAL_FAV_SPLIT), 25)
+    if not seeds:
+        # 期間内の曲がない（最近ライブラリを更新していない）時は、お気に入り全体から種を選ぶ
+        seeds = random.Random(skey).sample(liked_tracks, min(25, len(liked_tracks)))
+        print("  期間内のお気に入りがないため、お気に入り全体から選んだ曲をもとにおすすめを探します。")
+    recs = _seasonal_recommendations(seeds, artist_set, size - len(favorites))
+    if len(favorites) + len(recs) < size:
+        # おすすめが足りない分は、まだ選んでいないお気に入りで埋める（先頭の選び方は変わらない）
+        more = seas.pick_favorites(pools, quotas, size - len(recs))
+        if len(more) > len(favorites):
+            print(f"  おすすめが {len(recs)} 曲だったので、お気に入りを {len(more) - len(favorites)} 曲足しました。")
+            favorites = more
+    tracks = seas.interleave(favorites, recs)
+    if not tracks:
+        print("  曲が見つかりませんでした。")
+        return 1
+
+    mood, mood_score = seas.detect_mood(favorites or seeds)
+    existing = _fetch_own_playlists()
+    avoid = set(existing) | {r["name"] for r in runs}
+    name = opts["name"] or seas.make_title(season, mood, avoid, seed=f"{skey}-{len(runs)}")
+    if opts["name"] and name.lower() in {a.lower() for a in avoid}:
+        print(f"  「{name}」はもうあります。別の名前を --name で指定してください。")
+        return 1
+    counts = {k: sum(1 for t in tracks if t["_source"] == k) for k in SOURCE_JA}
+    description = (f"{today.year} {seas.SEASON_JA[season]} · {seas.MOOD_JA[mood]} · "
+                   f"お気に入り {len(favorites)} 曲 + おすすめ {len(recs)} 曲 · splab seasonal")
+
+    generated[name] = tracks
+    print(f"\n[{name}] {len(tracks)} 曲  雰囲気: {seas.MOOD_JA[mood]} {mood_score}")
+    print("  内訳: " + " / ".join(f"{SOURCE_JA[k]} {v}" for k, v in counts.items()))
+    for i, t in enumerate(tracks, 1):
+        _print_track(i, t)
+        print(f"         └ {SOURCE_JA[t['_source']]}" + (f"（{t['_why']}）" if t.get("_why") else ""))
+
+    _save_json(SEASONAL_PLAN_FILE, {
+        "created_at": now.isoformat(), "name": name, "description": description, "mood": mood,
+        "counts": counts, "tracks": [{k: t.get(k) for k in ("artist", "name", "uri", "_source", "_why")}
+                                     for t in tracks],
+    })
+    print(f"\n  一覧を {SEASONAL_PLAN_FILE} に保存しました。")
+
+    if opts["dry_run"]:
+        print("  --dry-run のため、Spotify には作りません。")
+        return 0
+    if not opts["yes"]:
+        if not interactive or not sys.stdin.isatty():
+            print("  --yes がないため、Spotify には作りません。")
+            return 0
+        if input(f"\n「{name}」を Spotify に作りますか？ (y/n): ").strip().lower() not in ("y", "yes"):
+            print("キャンセルしました。")
+            return 0
+
+    result = sp._post("me/playlists", payload={"name": name, "public": False, "description": description})
+    uris = [t["uri"] for t in tracks]
+    # 曲の追加の前に記録しておく（途中で失敗したら、次の実行がこのプレイリストに続きを入れる）
+    run = {"date": today.isoformat(), "at": now.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
+           "favorites": len(favorites), "recommendations": len(recs), "status": "creating", "uris": uris}
+    runs.append(run)
+    state["runs"] = runs
+    _save_json(SEASONAL_STATE_FILE, state)
+    _finish_seasonal_run(run, state)
+    print(f"  「{name}」（{len(uris)} 曲）を Spotify に作りました。")
+    return 0
+
+
+def cmd_login():
+    """user-follow-read を含むスコープでログインし直す（ブラウザが使える PC で実行）."""
+    global sp, user_id
+    sp = get_spotify_client(full_scope=True)
+    user_id = sp.current_user()["id"]
+    print(f"ログイン成功: {user_id}（フォロー一覧も読めるようになりました）")
+
+
 def cmd_playlists():
     """自分の Spotify プレイリスト一覧を表示."""
     ensure_login()
@@ -1280,6 +1710,11 @@ def cmd_help():
                      省略時: 3曲以上のアーティストの類似
   preview [名]       生成済みプレイリスト確認
 
+  seasonal [--yes] [--dry-run] [--size N] [--fav-ratio R] [--days N] [--name 名]
+                     季節ごとの詩的なプレイリストを作る
+                     (最近追加・最近リリース・最近フォローのお気に入り + おすすめ)
+  login              フォロー一覧も読めるスコープでログインし直す
+
   apply [名/all]     Spotify にプレイリスト反映
   playlists          Spotify プレイリスト一覧
 
@@ -1303,12 +1738,42 @@ COMMANDS = {
     "discover": cmd_discover,
     "preview": cmd_preview,
     "apply": cmd_apply,
+    "seasonal": cmd_seasonal,
+    "login": lambda a: cmd_login(),
     "playlists": lambda a: cmd_playlists(),
     "help": lambda a: cmd_help(),
 }
 
 
+def run_cli(argv: list[str]) -> int:
+    """対話なしの入口. 例: python splab.py seasonal --yes."""
+    cmd, rest = argv[0].lower(), " ".join(shlex.quote(a) for a in argv[1:])
+    try:
+        if cmd == "seasonal":
+            if os.path.exists(DATA_FILE):
+                cmd_load()
+            return cmd_seasonal(rest, interactive=False)
+        if cmd == "login":
+            cmd_login()
+            return 0
+        print(f"不明なコマンド: {cmd}（対話なしで使えるのは seasonal・login）")
+        return 1
+    except SpotifyAuthError as e:
+        print(f"Spotify にログインできません: {e}")
+        print("手元の PC で python splab.py login を実行し、できた .cache をこのフォルダにコピーしてください。")
+        return 2
+    except SpotifyRateLimitError as e:
+        print(f"Spotify のレート制限: {e}")
+        return 1
+    except Exception as e:
+        print(f"エラー: {e}")
+        return 1
+
+
 def main():
+    if len(sys.argv) > 1:
+        sys.exit(run_cli(sys.argv[1:]))
+
     print("=" * 50)
     print("  SpotifyPlaylistLab")
     print("  対話型プレイリスト生成ツール")
