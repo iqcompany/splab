@@ -152,16 +152,24 @@ def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: 
             got += 1
         return got
 
-    shortage = 0
     for name, q in quotas.items():
-        shortage += q - take(name, q)
-    # 足りない分を、ほかのプールの残りから埋める
-    if shortage > 0:
-        for name in quotas:
-            if len(chosen) >= total:
-                break
-            take(name, total - len(chosen))
+        take(name, q)
+    # 割り当てに届かない枠や端数の分を、ほかのプールの残りから埋める
+    for name in quotas:
+        if len(chosen) >= total:
+            break
+        take(name, total - len(chosen))
     return chosen[:total]
+
+
+def split_quotas(total: int, ratios: dict[str, float]) -> dict[str, int]:
+    """total を ratios の割合で分ける（端数は大きい順に配り、合計が必ず total になる）."""
+    raw = {k: total * r for k, r in ratios.items()}
+    out = {k: int(v) for k, v in raw.items()}
+    rest = total - sum(out.values())
+    for k in sorted(raw, key=lambda k: raw[k] - out[k], reverse=True)[:rest]:
+        out[k] += 1
+    return out
 
 
 def interleave(favorites: list[dict], recs: list[dict]) -> list[dict]:

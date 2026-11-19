@@ -1425,10 +1425,10 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
     last = runs[-1] if runs else None
     if last and last.get("season_key") == skey and not opts["force"]:
         msg = f"この季節（{skey}）は {last['date']} に「{last['name']}」を作成済みです。"
-        if opts["yes"]:
-            print(f"  {msg} スキップします（作り直すなら --force）。")
+        if not opts["dry_run"]:
+            print(f"  {msg} スキップします（もう1つ作るなら --force）。")
             return 0
-        print(f"  注意: {msg}")
+        print(f"  注意: {msg}（--dry-run なので一覧だけ作ります）")
 
     ensure_login(interactive=interactive)
     if opts["fetch"]:
@@ -1438,11 +1438,11 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
     if not ensure_liked():
         return 1
 
-    # 期間: 前回の実行日から（なければ days 日前から）。長すぎないよう days*2 までに抑える
+    # 期間: 前回の実行日から（なければ days 日前から）。前回が古すぎる時は days*2 日前までに抑える
     since_dt = now - timedelta(days=opts["days"])
     if last:
         last_dt = datetime.fromisoformat(last["date"]).replace(tzinfo=seas.JST)
-        since_dt = max(min(last_dt, since_dt), now - timedelta(days=opts["days"] * 2))
+        since_dt = max(last_dt, now - timedelta(days=opts["days"] * 2))
     release_since = today - timedelta(days=opts["release_days"])
 
     # 3. 最近フォローしたアーティスト
@@ -1471,7 +1471,7 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
 
     size = opts["size"]
     n_fav = round(size * opts["fav_ratio"])
-    quotas = {k: round(n_fav * r) for k, r in SEASONAL_FAV_SPLIT.items()}
+    quotas = seas.split_quotas(n_fav, SEASONAL_FAV_SPLIT)
     favorites = seas.pick_favorites(pools, quotas, n_fav)
 
     if _enrich_some(favorites) and not opts["dry_run"]:
@@ -1479,6 +1479,12 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
 
     print(f"\n  おすすめの曲を探しています（{size - len(favorites)} 曲。数分かかります）...")
     recs = _seasonal_recommendations(favorites, artist_set, size - len(favorites))
+    if len(favorites) + len(recs) < size:
+        # おすすめが足りない分は、まだ選んでいないお気に入りで埋める（先頭の選び方は変わらない）
+        more = seas.pick_favorites(pools, quotas, size - len(recs))
+        if len(more) > len(favorites):
+            print(f"  おすすめが {len(recs)} 曲だったので、お気に入りを {len(more) - len(favorites)} 曲足しました。")
+            favorites = more
     tracks = seas.interleave(favorites, recs)
     if not tracks:
         print("  曲が見つかりませんでした。")

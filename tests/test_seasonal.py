@@ -49,6 +49,21 @@ class PoolTest(unittest.TestCase):
         self.assertEqual([t["id"] for t in got], ["id1", "id2", "id3", "id4", "id5"])
         self.assertEqual(len({t["id"] for t in got}), 5)
 
+    def test_pick_favorites_fills_rounding(self):
+        pools = {"added": [T(i) for i in range(10)], "released": [], "followed": []}
+        quotas = seas.split_quotas(8, {"added": 0.4, "released": 0.3, "followed": 0.3})
+        self.assertEqual(sum(quotas.values()), 8)
+        self.assertEqual(len(seas.pick_favorites(pools, quotas, 8)), 8)
+        self.assertEqual(sum(seas.split_quotas(1, {"a": 0.4, "b": 0.3, "c": 0.3}).values()), 1)
+
+    def test_pick_favorites_prefix_is_stable(self):
+        pools = {"added": [T(i) for i in range(5)], "released": [T(i) for i in range(5, 10)], "followed": []}
+        q = {"added": 2, "released": 2, "followed": 0}
+        small = seas.pick_favorites(pools, q, 4)
+        big = seas.pick_favorites(pools, q, 8)
+        self.assertEqual(big[:4], small)
+        self.assertEqual(len(big), 8)
+
     def test_interleave(self):
         out = seas.interleave([1, 2, 3, 4], ["a", "b"])
         self.assertEqual(out, [1, "a", 2, 3, "b", 4])
