@@ -86,10 +86,13 @@ _MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                 "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 
-def _fetch_user_playlist_names() -> set[str]:
-    """ユーザーの Spotify プレイリスト名一覧を取得."""
+def _fetch_user_playlists() -> dict[str, str]:
+    """自分が所有する Spotify プレイリストを全件取得し、名前 -> ID の辞書を返す.
+
+    同名のプレイリストが複数ある場合は、一覧で先に出てくる方を採用する.
+    """
     ensure_login()
-    names = set()
+    playlists: dict[str, str] = {}
     offset = 0
     while True:
         results = sp.current_user_playlists(limit=50, offset=offset)
@@ -98,9 +101,14 @@ def _fetch_user_playlist_names() -> set[str]:
             break
         for pl in items:
             if pl["owner"]["id"] == user_id:
-                names.add(pl["name"])
+                playlists.setdefault(pl["name"], pl["id"])
         offset += 50
-    return names
+    return playlists
+
+
+def _fetch_user_playlist_names() -> set[str]:
+    """ユーザーの Spotify プレイリスト名一覧を取得."""
+    return set(_fetch_user_playlists())
 
 
 def _resolve_playlist_name(base_name: str, existing_names: set[str], is_recent: bool = False) -> str:
@@ -677,6 +685,9 @@ def cmd_apply(args: str):
         print("キャンセルしました。")
         return
 
+    # 既存プレイリストを全件取得（先頭 50 件だけだと見落として同名を重複作成する）
+    existing_playlists = _fetch_user_playlists()
+
     for name, tracks in targets.items():
         if not tracks:
             print(f"  [{name}] 曲がないためスキップ。")
@@ -684,13 +695,7 @@ def cmd_apply(args: str):
 
         uris = [t["uri"] for t in tracks]
 
-        # 既存プレイリスト検索
-        playlists = sp.current_user_playlists(limit=50)
-        playlist_id = None
-        for pl in playlists["items"]:
-            if pl["name"] == name and pl["owner"]["id"] == user_id:
-                playlist_id = pl["id"]
-                break
+        playlist_id = existing_playlists.get(name)
 
         if playlist_id:
             # MMM/YYYY サフィックス付き（最近の曲系）→ 追記、それ以外 → 上書き
@@ -725,6 +730,7 @@ def cmd_apply(args: str):
                 "description": "",
             })
             playlist_id = result["id"]
+            existing_playlists[name] = playlist_id
             action = "作成"
 
         for i in range(0, len(uris), 100):
