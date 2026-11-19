@@ -7,3 +7,5 @@ data/seasonal_state.json
 data/seasonal_plan.json
 data/seasonal.log
 .venv
+data/seasonal.lock
+data/*.tmp

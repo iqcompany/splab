@@ -1,11 +1,14 @@
 """SpotifyPlaylistLab - 対話型プレイリスト生成ツール."""
 
+import fcntl
 import json
+import math
 import os
 import random
 import re
 import shlex
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -26,6 +29,7 @@ DATA_FILE = os.path.join(DATA_DIR, "tracks.json")
 RULES_DIR = "rules"
 SEASONAL_STATE_FILE = os.path.join(DATA_DIR, "seasonal_state.json")
 SEASONAL_PLAN_FILE = os.path.join(DATA_DIR, "seasonal_plan.json")
+SEASONAL_LOCK_FILE = os.path.join(DATA_DIR, "seasonal.lock")
 
 # 状態管理
 sp = None
@@ -1242,10 +1246,42 @@ def _load_json(path: str, default):
 
 def _save_json(path: str, data):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # 一時ファイルはプロセスごとに別の名前にして、保存が重なっても壊れないようにする
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
+                               dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def _playlist_uris(playlist_id: str) -> set[str]:
+    """プレイリストに入っている曲の URI（全件）."""
+    uris = set()
+    resp = sp.playlist_items(playlist_id, fields="items(track(uri)),next", limit=100)
+    while resp:
+        for item in resp.get("items", []):
+            track = item.get("track") or {}
+            if track.get("uri"):
+                uris.add(track["uri"])
+        resp = sp.next(resp) if resp.get("next") else None
+    return uris
+
+
+def _finish_seasonal_run(run: dict, state: dict):
+    """作成中（status=creating）の実行の、まだ入っていない曲を追加して完了にする（途中で失敗しても再開できる）."""
+    have = _playlist_uris(run["playlist_id"])
+    missing = [u for u in run.get("uris", []) if u not in have]
+    for i in range(0, len(missing), 100):
+        sp.playlist_add_items(run["playlist_id"], missing[i:i + 100])
+    run["status"] = "done"
+    run.pop("uris", None)
+    _save_json(SEASONAL_STATE_FILE, state)
+    return len(missing)
 
 
 def _fetch_own_playlists() -> dict[str, str]:
@@ -1415,12 +1451,32 @@ def _parse_seasonal_args(args: str) -> dict:
         else:
             raise ValueError(f"seasonal: 分からないオプション: {tok}")
         i += 1
+    if not 1 <= opts["size"] <= 1000:
+        raise ValueError("seasonal: --size は 1〜1000 にしてください")
+    if not (math.isfinite(opts["fav_ratio"]) and 0 <= opts["fav_ratio"] <= 1):
+        raise ValueError("seasonal: --fav-ratio は 0〜1 にしてください")
+    if not 1 <= opts["days"] <= 3650 or not 1 <= opts["release_days"] <= 3650:
+        raise ValueError("seasonal: --days と --release-days は 1〜3650 にしてください")
     return opts
 
 
 def cmd_seasonal(args: str, interactive: bool = True) -> int:
-    """季節ごとの詩的なプレイリストを作る. 戻り値は終了コード（0: 成功・スキップ, 1: 失敗）."""
+    """季節ごとの詩的なプレイリストを作る. 戻り値は終了コード（0: 成功・スキップ, 1: 失敗）.
+
+    cron と手動の実行が重ならないよう、終わるまで data/seasonal.lock をロックする。
+    """
     opts = _parse_seasonal_args(args)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(SEASONAL_LOCK_FILE, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("  別の seasonal が実行中です。終わってからもう一度実行してください。")
+            return 1
+        return _seasonal_locked(opts, interactive)
+
+
+def _seasonal_locked(opts: dict, interactive: bool) -> int:
     now = datetime.now(seas.JST)
     today = now.date()
     skey = seas.season_key(today)
@@ -1430,6 +1486,16 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
     state = _load_json(SEASONAL_STATE_FILE, {})
     runs = state.get("runs", [])
     last = runs[-1] if runs else None
+    if last and last.get("status") == "creating":
+        # 前回、プレイリストを作ったあと曲の追加の途中で止まった → 続きから
+        if opts["dry_run"]:
+            print(f"  注意: 「{last['name']}」は曲の追加の途中で止まっています（--dry-run なので再開しません）。")
+        else:
+            ensure_login(interactive=interactive)
+            n = _finish_seasonal_run(last, state)
+            print(f"  途中で止まっていた「{last['name']}」に {n} 曲を追加して、完了にしました。")
+            if last.get("season_key") == skey and not opts["force"]:
+                return 0
     if last and last.get("season_key") == skey and not opts["force"]:
         msg = f"この季節（{skey}）は {last['date']} に「{last['name']}」を作成済みです。"
         if not opts["dry_run"]:
@@ -1487,6 +1553,10 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
     print(f"\n  おすすめの曲を探しています（{size - len(favorites)} 曲。数分かかります）...")
     # お気に入りを入れない設定（--fav-ratio 0）でも、プールの曲を種にしておすすめを探す
     seeds = favorites or seas.pick_favorites(pools, seas.split_quotas(25, SEASONAL_FAV_SPLIT), 25)
+    if not seeds:
+        # 期間内の曲がない（最近ライブラリを更新していない）時は、お気に入り全体から種を選ぶ
+        seeds = random.Random(skey).sample(liked_tracks, min(25, len(liked_tracks)))
+        print("  期間内のお気に入りがないため、お気に入り全体から選んだ曲をもとにおすすめを探します。")
     recs = _seasonal_recommendations(seeds, artist_set, size - len(favorites))
     if len(favorites) + len(recs) < size:
         # おすすめが足りない分は、まだ選んでいないお気に入りで埋める（先頭の選び方は変わらない）
@@ -1536,14 +1606,14 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
             return 0
 
     result = sp._post("me/playlists", payload={"name": name, "public": False, "description": description})
-    playlist_id = result["id"]
     uris = [t["uri"] for t in tracks]
-    for i in range(0, len(uris), 100):
-        sp.playlist_add_items(playlist_id, uris[i:i + 100])
-    runs.append({"date": today.isoformat(), "season_key": skey, "name": name, "playlist_id": playlist_id,
-                 "favorites": len(favorites), "recommendations": len(recs)})
+    # 曲の追加の前に記録しておく（途中で失敗したら、次の実行がこのプレイリストに続きを入れる）
+    run = {"date": today.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
+           "favorites": len(favorites), "recommendations": len(recs), "status": "creating", "uris": uris}
+    runs.append(run)
     state["runs"] = runs
     _save_json(SEASONAL_STATE_FILE, state)
+    _finish_seasonal_run(run, state)
     print(f"  「{name}」（{len(uris)} 曲）を Spotify に作りました。")
     return 0
 
