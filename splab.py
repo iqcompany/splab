@@ -1,6 +1,5 @@
 """SpotifyPlaylistLab - 対話型プレイリスト生成ツール."""
 
-import fcntl
 import json
 import math
 import os
@@ -1259,6 +1258,20 @@ def _save_json(path: str, data):
         raise
 
 
+def _try_lock(f) -> bool:
+    """ファイルを、ほかのプロセスと重ならないようロックする（取れなければ False）. Windows でも動く."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
 def _playlist_uris(playlist_id: str) -> set[str]:
     """プレイリストに入っている曲の URI（全件）."""
     uris = set()
@@ -1468,9 +1481,7 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
     opts = _parse_seasonal_args(args)
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(SEASONAL_LOCK_FILE, "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _try_lock(lock):
             print("  別の seasonal が実行中です。終わってからもう一度実行してください。")
             return 1
         return _seasonal_locked(opts, interactive)
@@ -1521,7 +1532,11 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     # 3. 最近フォローしたアーティスト
     followed = _fetch_followed_artists()
     if followed is not None:
-        state["followed"] = seas.update_follow_state(state.get("followed", {}), followed, today.isoformat())
+        # 記録を始めた日（followed_since）があれば、フォローが0組でも初回ではない
+        first_run = "followed_since" not in state
+        state["followed"] = seas.update_follow_state(state.get("followed", {}), followed, today.isoformat(),
+                                                     first_run=first_run)
+        state.setdefault("followed_since", today.isoformat())
         recent_follow = seas.recently_followed(state["followed"], since_dt.date())
         print(f"  フォロー中 {len(followed)} 組（記録を始めてから新しくフォロー: {len(recent_follow)} 組）")
         if not opts["dry_run"] or not runs:

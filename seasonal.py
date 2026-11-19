@@ -107,15 +107,17 @@ def newly_loved_artists(tracks: list[dict], since: datetime) -> set[str]:
     return {a for a, dt in first.items() if dt >= since}
 
 
-def update_follow_state(state: dict, followed: list[dict], today: str) -> dict:
+def update_follow_state(state: dict, followed: list[dict], today: str, first_run: bool | None = None) -> dict:
     """フォロー一覧の記録を更新する.
 
     state: {artist_id: {"name": ..., "first_seen": "YYYY-MM-DD" or "baseline"}}
-    初回（state が空）は全員を "baseline"（いつフォローしたか分からない）にする。
+    初回（first_run。省略時は state が空かどうか）は全員を "baseline"（いつフォローしたか分からない）にする。
+    フォローが0組でも記録を始めていれば初回ではないので、呼び出し側で first_run を渡す。
     2回目からは、新しく出てきたアーティストに今日の日付を付ける。
     フォローを外したアーティストは消す。
     """
-    first_run = not state
+    if first_run is None:
+        first_run = not state
     new_state = {}
     for a in followed:
         prev = state.get(a["id"])

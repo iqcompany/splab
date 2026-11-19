@@ -43,6 +43,14 @@ class PoolTest(unittest.TestCase):
         s = seas.update_follow_state(s, [{"id": "b", "name": "B"}], "2027-01-01")
         self.assertNotIn("a", s)
 
+    def test_follow_state_from_empty_list(self):
+        # 記録を始めた時はフォロー0組 → 次に新しくフォローしたら「最近フォロー」になる
+        s = seas.update_follow_state({}, [], "2026-11-01", first_run=True)
+        self.assertEqual(s, {})
+        s = seas.update_follow_state(s, [{"id": "c", "name": "C"}], "2026-12-01", first_run=False)
+        self.assertEqual(s["c"]["first_seen"], "2026-12-01")
+        self.assertEqual(seas.recently_followed(s, date(2026, 11, 15)), {"C"})
+
     def test_pick_favorites_fills_shortage(self):
         pools = {"added": [T(1), T(2)], "released": [T(2), T(3), T(4), T(5)], "followed": []}
         got = seas.pick_favorites(pools, {"added": 2, "released": 1, "followed": 2}, 5)
