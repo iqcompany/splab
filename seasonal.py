@@ -110,7 +110,7 @@ def newly_loved_artists(tracks: list[dict], since: datetime) -> set[str]:
 def update_follow_state(state: dict, followed: list[dict], today: str, first_run: bool | None = None) -> dict:
     """フォロー一覧の記録を更新する.
 
-    state: {artist_id: {"name": ..., "first_seen": "YYYY-MM-DD" or "baseline"}}
+    state: {artist_id: {"name": ..., "first_seen": 見つけた日時（ISO 形式） or "baseline"}}
     初回（first_run。省略時は state が空かどうか）は全員を "baseline"（いつフォローしたか分からない）にする。
     フォローが0組でも記録を始めていれば初回ではないので、呼び出し側で first_run を渡す。
     2回目からは、新しく出てきたアーティストに今日の日付を付ける。
@@ -128,9 +128,28 @@ def update_follow_state(state: dict, followed: list[dict], today: str, first_run
     return new_state
 
 
-def recently_followed(state: dict, since: date) -> set[str]:
-    s = since.isoformat()
-    return {v["name"] for v in state.values() if v["first_seen"] != "baseline" and v["first_seen"] >= s}
+def parse_seen(s: str) -> datetime | None:
+    """first_seen（'YYYY-MM-DDTHH:MM:SS+09:00'。古い記録は 'YYYY-MM-DD' で、その日の 0 時 JST とみなす）."""
+    if not s or s == "baseline":
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=JST)
+
+
+def recently_followed(state: dict, since: datetime) -> set[str]:
+    """since より後（同じ時刻は含めない）に初めて見つけたアーティスト.
+
+    since に前回の実行の時刻を渡すと、前回の実行で見つけた（＝前回のプレイリストに使った）アーティストは入らない。
+    """
+    out = set()
+    for v in state.values():
+        dt = parse_seen(v["first_seen"])
+        if dt and dt > since:
+            out.add(v["name"])
+    return out
 
 
 def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: int) -> list[dict]:

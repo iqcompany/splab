@@ -1525,7 +1525,8 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     # 期間: 前回の実行日から（なければ days 日前から）。前回が古すぎる時は days*2 日前までに抑える
     since_dt = now - timedelta(days=opts["days"])
     if last:
-        last_dt = datetime.fromisoformat(last["date"]).replace(tzinfo=seas.JST)
+        # 前回の実行の時刻（古い記録は日付だけなので、その日の 0 時 JST）
+        last_dt = seas.parse_seen(last.get("at") or last["date"])
         since_dt = max(last_dt, now - timedelta(days=opts["days"] * 2))
     release_since = today - timedelta(days=opts["release_days"])
 
@@ -1534,10 +1535,10 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     if followed is not None:
         # 記録を始めた日（followed_since）があれば、フォローが0組でも初回ではない
         first_run = "followed_since" not in state
-        state["followed"] = seas.update_follow_state(state.get("followed", {}), followed, today.isoformat(),
+        state["followed"] = seas.update_follow_state(state.get("followed", {}), followed, now.isoformat(),
                                                      first_run=first_run)
         state.setdefault("followed_since", today.isoformat())
-        recent_follow = seas.recently_followed(state["followed"], since_dt.date())
+        recent_follow = seas.recently_followed(state["followed"], since_dt)
         print(f"  フォロー中 {len(followed)} 組（記録を始めてから新しくフォロー: {len(recent_follow)} 組）")
         if not opts["dry_run"] or not runs:
             # フォロー一覧の記録は早く始めるほど正確になるので、初回は dry-run でも残す
@@ -1623,7 +1624,7 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     result = sp._post("me/playlists", payload={"name": name, "public": False, "description": description})
     uris = [t["uri"] for t in tracks]
     # 曲の追加の前に記録しておく（途中で失敗したら、次の実行がこのプレイリストに続きを入れる）
-    run = {"date": today.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
+    run = {"date": today.isoformat(), "at": now.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
            "favorites": len(favorites), "recommendations": len(recs), "status": "creating", "uris": uris}
     runs.append(run)
     state["runs"] = runs

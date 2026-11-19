@@ -39,7 +39,7 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(s["a"]["first_seen"], "baseline")
         s = seas.update_follow_state(s, [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}], "2026-12-01")
         self.assertEqual(s["b"]["first_seen"], "2026-12-01")
-        self.assertEqual(seas.recently_followed(s, date(2026, 11, 15)), {"B"})
+        self.assertEqual(seas.recently_followed(s, datetime(2026, 11, 15, tzinfo=seas.JST)), {"B"})
         s = seas.update_follow_state(s, [{"id": "b", "name": "B"}], "2027-01-01")
         self.assertNotIn("a", s)
 
@@ -49,7 +49,17 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(s, {})
         s = seas.update_follow_state(s, [{"id": "c", "name": "C"}], "2026-12-01", first_run=False)
         self.assertEqual(s["c"]["first_seen"], "2026-12-01")
-        self.assertEqual(seas.recently_followed(s, date(2026, 11, 15)), {"C"})
+        self.assertEqual(seas.recently_followed(s, datetime(2026, 11, 15, tzinfo=seas.JST)), {"C"})
+
+    def test_follow_seen_in_previous_run_is_not_reused(self):
+        # 12/1 9:00 の実行で見つけたアーティストは、その実行の時刻を期間の始まりにする次の回には入らない
+        run_at = "2026-12-01T09:00:00+09:00"
+        s = seas.update_follow_state({"a": {"name": "A", "first_seen": "baseline"}},
+                                     [{"id": "a", "name": "A"}, {"id": "d", "name": "D"}], run_at, first_run=False)
+        self.assertEqual(seas.recently_followed(s, seas.parse_seen(run_at)), set())
+        self.assertEqual(seas.recently_followed(s, datetime(2026, 11, 1, tzinfo=seas.JST)), {"D"})
+        # 古い記録（日付だけ）も読める
+        self.assertEqual(seas.parse_seen("2026-12-01"), datetime(2026, 12, 1, tzinfo=seas.JST))
 
     def test_pick_favorites_fills_shortage(self):
         pools = {"added": [T(1), T(2)], "released": [T(2), T(3), T(4), T(5)], "followed": []}
