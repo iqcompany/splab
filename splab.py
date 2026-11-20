@@ -1234,6 +1234,7 @@ SEASONAL_DEFAULTS = {
     "fav_ratio": 0.5,     # お気に入りの割合（残りはおすすめ）
     "days": 90,           # 「最近追加」「最近フォロー」の期間（前回の実行があればそこから）
     "release_days": 180,  # 「最近リリース」の期間
+    "max_per_artist": 7,  # 同じアーティストの曲数の上限（0 で上限なし）
 }
 # お気に入りの内訳（合計 1.0）
 SEASONAL_FAV_SPLIT = {"added": 0.4, "released": 0.3, "followed": 0.3}
@@ -1373,11 +1374,15 @@ def _enrich_some(tracks: list[dict], limit: int = 60) -> int:
     return n
 
 
-def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str], n: int) -> list[dict]:
+def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str], n: int,
+                              per_artist: int | None = None,
+                              taken: dict[str, int] | None = None) -> list[dict]:
     """お気に入りにまだ入っていない、おすすめの曲を n 曲探す（Last.fm の類似曲・類似アーティスト）.
 
     favorites: 似た曲を探す種（プレイリストに入れるお気に入りか、それが空の時はプールの曲）.
+    per_artist: 同じアーティストの上限。taken（プレイリストに入れるお気に入りの、アーティストごとの曲数）と合わせて数える.
     """
+    per = dict(taken or {})
     if n <= 0 or not LASTFM_API_KEY:
         if n > 0:
             print("  LASTFM_API_KEY がないため、おすすめの曲は探せません。")
@@ -1438,6 +1443,10 @@ def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str],
             continue
         if seas.track_key(seas.primary_artist(track), track["name"]) in liked_keys:
             continue
+        a = seas.primary_artist(track).lower()
+        if per_artist is not None and per.get(a, 0) >= per_artist:
+            continue
+        per[a] = per.get(a, 0) + 1
         seen.add(track["id"])
         out.append({**track, "_source": "rec", "_why": c["why"]})
     return out
@@ -1458,7 +1467,7 @@ def _parse_seasonal_args(args: str) -> dict:
             opts["force"] = True
         elif tok == "--no-fetch":
             opts["fetch"] = False
-        elif tok in ("--size", "--days", "--release-days") and val is not None:
+        elif tok in ("--size", "--days", "--release-days", "--max-per-artist") and val is not None:
             opts[tok[2:].replace("-", "_")] = int(val)
             i += 1
         elif tok == "--fav-ratio" and val is not None:
@@ -1476,6 +1485,8 @@ def _parse_seasonal_args(args: str) -> dict:
         raise ValueError("seasonal: --fav-ratio は 0〜1 にしてください")
     if not 1 <= opts["days"] <= 3650 or not 1 <= opts["release_days"] <= 3650:
         raise ValueError("seasonal: --days と --release-days は 1〜3650 にしてください")
+    if not 0 <= opts["max_per_artist"] <= 1000:
+        raise ValueError("seasonal: --max-per-artist は 0〜1000 にしてください（0 で上限なし）")
     return opts
 
 
@@ -1567,7 +1578,8 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     size = opts["size"]
     n_fav = round(size * opts["fav_ratio"])
     quotas = seas.split_quotas(n_fav, SEASONAL_FAV_SPLIT)
-    favorites = seas.pick_favorites(pools, quotas, n_fav)
+    cap = opts["max_per_artist"] or None
+    favorites = seas.pick_favorites(pools, quotas, n_fav, per_artist=cap)
 
     if _enrich_some(favorites) and not opts["dry_run"]:
         _save_tracks()
@@ -1579,14 +1591,18 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
         # 期間内の曲がない（最近ライブラリを更新していない）時は、お気に入り全体から種を選ぶ
         seeds = random.Random(skey).sample(liked_tracks, min(25, len(liked_tracks)))
         print("  期間内のお気に入りがないため、お気に入り全体から選んだ曲をもとにおすすめを探します。")
-    recs = _seasonal_recommendations(seeds, artist_set, size - len(favorites))
+    recs = _seasonal_recommendations(seeds, artist_set, size - len(favorites),
+                                     per_artist=cap, taken=seas.artist_counts(favorites))
     if len(favorites) + len(recs) < size:
         # おすすめが足りない分は、まだ選んでいないお気に入りで埋める（先頭の選び方は変わらない）
-        more = seas.pick_favorites(pools, quotas, size - len(recs))
+        # おすすめに入った曲も数に入れて、アーティストの上限を超えないようにする
+        more = seas.pick_favorites(pools, quotas, size - len(recs), per_artist=cap,
+                                   taken=seas.artist_counts(recs))
         if len(more) > len(favorites):
             print(f"  おすすめが {len(recs)} 曲だったので、お気に入りを {len(more) - len(favorites)} 曲足しました。")
             favorites = more
-    tracks = seas.interleave(favorites, recs)
+    # 念のため、最後にもう一度上限を確かめる
+    tracks = seas.cap_per_artist(seas.interleave(favorites, recs), cap)
     if not tracks:
         print("  曲が見つかりませんでした。")
         return 1
@@ -1711,6 +1727,7 @@ def cmd_help():
   preview [名]       生成済みプレイリスト確認
 
   seasonal [--yes] [--dry-run] [--size N] [--fav-ratio R] [--days N] [--name 名]
+           [--max-per-artist N]
                      季節ごとの詩的なプレイリストを作る
                      (最近追加・最近リリース・最近フォローのお気に入り + おすすめ)
   login              フォロー一覧も読めるスコープでログインし直す

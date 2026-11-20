@@ -152,14 +152,18 @@ def recently_followed(state: dict, since: datetime) -> set[str]:
     return out
 
 
-def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: int) -> list[dict]:
+def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: int,
+                   per_artist: int | None = None, taken: dict[str, int] | None = None) -> list[dict]:
     """3つのプールから、割り当て（quotas）どおりに重複なしで選ぶ.
 
     あるプールが足りない時は、残りをほかのプールから順番に埋める。
+    per_artist を指定すると、同じアーティスト（primary_artist）は per_artist 曲までにする。
+    taken は、ほかで選んだ曲のアーティストごとの数（per_artist の数に含める）。
     各曲に "_source"（added / released / followed）を付ける。
     """
     chosen: list[dict] = []
     seen: set[str] = set()
+    per: dict[str, int] = dict(taken or {})
 
     def take(name: str, n: int) -> int:
         got = 0
@@ -168,6 +172,10 @@ def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: 
                 break
             if t["id"] in seen:
                 continue
+            a = primary_artist(t).lower()
+            if per_artist is not None and per.get(a, 0) >= per_artist:
+                continue
+            per[a] = per.get(a, 0) + 1
             seen.add(t["id"])
             chosen.append({**t, "_source": name})
             got += 1
@@ -181,6 +189,30 @@ def pick_favorites(pools: dict[str, list[dict]], quotas: dict[str, int], total: 
             break
         take(name, total - len(chosen))
     return chosen[:total]
+
+
+def artist_counts(tracks: list[dict]) -> dict[str, int]:
+    """曲のリストを、アーティスト（primary_artist、小文字）ごとに数える."""
+    per: dict[str, int] = {}
+    for t in tracks:
+        a = primary_artist(t).lower()
+        per[a] = per.get(a, 0) + 1
+    return per
+
+
+def cap_per_artist(tracks: list[dict], per_artist: int | None) -> list[dict]:
+    """同じアーティストの曲を、前から per_artist 曲までに減らす（None なら、そのまま）."""
+    if per_artist is None:
+        return list(tracks)
+    per: dict[str, int] = {}
+    out = []
+    for t in tracks:
+        a = primary_artist(t).lower()
+        if per.get(a, 0) >= per_artist:
+            continue
+        per[a] = per.get(a, 0) + 1
+        out.append(t)
+    return out
 
 
 def split_quotas(total: int, ratios: dict[str, float]) -> dict[str, int]:
