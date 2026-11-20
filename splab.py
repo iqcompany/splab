@@ -11,7 +11,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -1474,7 +1474,8 @@ def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str],
 
 
 def _parse_seasonal_args(args: str) -> dict:
-    opts = dict(SEASONAL_DEFAULTS, yes=False, dry_run=False, force=False, fetch=True, name=None)
+    opts = dict(SEASONAL_DEFAULTS, yes=False, dry_run=False, force=False, fetch=True, name=None,
+                from_plan=False, season_tag=True)
     toks = shlex.split(args or "")
     i = 0
     while i < len(toks):
@@ -1488,6 +1489,10 @@ def _parse_seasonal_args(args: str) -> dict:
             opts["force"] = True
         elif tok == "--no-fetch":
             opts["fetch"] = False
+        elif tok == "--from-plan":
+            opts["from_plan"] = True
+        elif tok == "--no-season-tag":
+            opts["season_tag"] = False
         elif tok in ("--size", "--days", "--release-days", "--max-per-artist") and val is not None:
             opts[tok[2:].replace("-", "_")] = int(val)
             i += 1
@@ -1525,41 +1530,10 @@ def cmd_seasonal(args: str, interactive: bool = True) -> int:
         return _seasonal_locked(opts, interactive)
 
 
-def _seasonal_locked(opts: dict, interactive: bool) -> int:
-    now = datetime.now(seas.JST)
-    today = now.date()
+def _seasonal_select(opts: dict, state: dict, runs: list, last: dict | None,
+                     now: datetime, today: date):
+    """seasonal の曲を選ぶ. (favorites, recs, tracks, mood, mood_score) か、曲がない時は None."""
     skey = seas.season_key(today)
-    season = seas.season_of(today)
-    print(f"[seasonal] {now:%Y-%m-%d %H:%M} JST  季節: {seas.SEASON_JA[season]}（{skey}）")
-
-    state = _load_json(SEASONAL_STATE_FILE, {})
-    runs = state.get("runs", [])
-    last = runs[-1] if runs else None
-    if last and last.get("status") == "creating":
-        # 前回、プレイリストを作ったあと曲の追加の途中で止まった → 続きから
-        if opts["dry_run"]:
-            print(f"  注意: 「{last['name']}」は曲の追加の途中で止まっています（--dry-run なので再開しません）。")
-        else:
-            ensure_login(interactive=interactive)
-            n = _finish_seasonal_run(last, state)
-            print(f"  途中で止まっていた「{last['name']}」に {n} 曲を追加して、完了にしました。")
-            if last.get("season_key") == skey and not opts["force"]:
-                return 0
-    if last and last.get("season_key") == skey and not opts["force"]:
-        msg = f"この季節（{skey}）は {last['date']} に「{last['name']}」を作成済みです。"
-        if not opts["dry_run"]:
-            print(f"  {msg} スキップします（もう1つ作るなら --force）。")
-            return 0
-        print(f"  注意: {msg}（--dry-run なので一覧だけ作ります）")
-
-    ensure_login(interactive=interactive)
-    if opts["fetch"]:
-        _refresh_liked()
-    elif not liked_tracks:
-        cmd_load()
-    if not ensure_liked():
-        return 1
-
     # 期間: 前回の実行日から（なければ days 日前から）。前回が古すぎる時は days*2 日前までに抑える
     since_dt = now - timedelta(days=opts["days"])
     if last:
@@ -1626,14 +1600,102 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     tracks = seas.cap_per_artist(seas.interleave(favorites, recs), cap)
     if not tracks:
         print("  曲が見つかりませんでした。")
-        return 1
+        return None
 
     mood, mood_score = seas.detect_mood(favorites or seeds)
+    return favorites, recs, tracks, mood, mood_score
+
+
+def _seasonal_from_plan(skey: str):
+    """dry-run で保存した一覧（data/seasonal_plan.json）を読む（Spotify の検索を使わない）.
+
+    (favorites, recs, tracks, mood, mood_score, base_name, plan) か、使えない時は None.
+    """
+    plan = _load_json(SEASONAL_PLAN_FILE, {})
+    tracks = [t for t in plan.get("tracks", []) if t.get("uri")]
+    if not tracks:
+        print(f"  {SEASONAL_PLAN_FILE} に一覧がありません。先に seasonal --dry-run を実行してください。")
+        return None
+    plan_key = plan.get("season_key")
+    if not plan_key and plan.get("created_at"):
+        plan_key = seas.season_key(datetime.fromisoformat(plan["created_at"]).date())
+    if plan_key != skey:
+        print(f"  保存した一覧は別の季節（{plan_key}）のものです。seasonal --dry-run で作り直してください。")
+        return None
+    favorites = [t for t in tracks if t.get("_source") != "rec"]
+    recs = [t for t in tracks if t.get("_source") == "rec"]
+    mood = plan.get("mood") if plan.get("mood") in seas.MOOD_JA else "bright"
+    base = plan.get("base_name") or seas.strip_season_tag(plan.get("name", "")) or None
+    print(f"  {SEASONAL_PLAN_FILE}（{plan.get('created_at', '?')} に作成）の {len(tracks)} 曲を使います。")
+    return favorites, recs, tracks, mood, {}, base, plan
+
+
+def _seasonal_locked(opts: dict, interactive: bool) -> int:
+    now = datetime.now(seas.JST)
+    today = now.date()
+    skey = seas.season_key(today)
+    season = seas.season_of(today)
+    print(f"[seasonal] {now:%Y-%m-%d %H:%M} JST  季節: {seas.SEASON_JA[season]}（{skey}）")
+
+    state = _load_json(SEASONAL_STATE_FILE, {})
+    runs = state.get("runs", [])
+    last = runs[-1] if runs else None
+    if last and last.get("status") == "creating":
+        # 前回、プレイリストを作ったあと曲の追加の途中で止まった → 続きから
+        if opts["dry_run"]:
+            print(f"  注意: 「{last['name']}」は曲の追加の途中で止まっています（--dry-run なので再開しません）。")
+        else:
+            ensure_login(interactive=interactive)
+            n = _finish_seasonal_run(last, state)
+            print(f"  途中で止まっていた「{last['name']}」に {n} 曲を追加して、完了にしました。")
+            if last.get("season_key") == skey and not opts["force"]:
+                return 0
+    if last and last.get("season_key") == skey and not opts["force"]:
+        msg = f"この季節（{skey}）は {last['date']} に「{last['name']}」を作成済みです。"
+        if not opts["dry_run"]:
+            print(f"  {msg} スキップします（もう1つ作るなら --force）。")
+            return 0
+        print(f"  注意: {msg}（--dry-run なので一覧だけ作ります）")
+
+    ensure_login(interactive=interactive)
+
+    if opts["from_plan"]:
+        picked = _seasonal_from_plan(skey)
+        base = opts["name"] or (picked and picked[5])
+    else:
+        if opts["fetch"]:
+            _refresh_liked()
+        elif not liked_tracks:
+            cmd_load()
+        if not ensure_liked():
+            return 1
+        picked = _seasonal_select(opts, state, runs, last, now, today)
+        base = opts["name"]
+    if picked is None:
+        return 1
+    favorites, recs, tracks, mood, mood_score = picked[:5]
+    # 実行の記録の時刻（次の回は、ここから後に追加・フォローしたものを選ぶ）
+    run_at = now
+    if opts["from_plan"]:
+        plan = picked[6]
+        # 曲を選んだのは一覧を保存した時なので、その時刻を記録する（そのあとに追加した曲を次の回に拾う）
+        if plan.get("created_at"):
+            run_at = datetime.fromisoformat(plan["created_at"])
+        # 一覧を保存した時のフォローの記録を引き継ぐ（次の季節に、同じアーティストを新しいフォローと数えない）
+        if "follow_state" in plan:
+            state["followed"] = plan["follow_state"]
+            if plan.get("followed_since"):
+                state["followed_since"] = plan["followed_since"]
+
     existing = _fetch_own_playlists()
     avoid = set(existing) | {r["name"] for r in runs}
-    name = opts["name"] or seas.make_title(season, mood, avoid, seed=f"{skey}-{len(runs)}")
-    if opts["name"] and name.lower() in {a.lower() for a in avoid}:
-        print(f"  「{name}」はもうあります。別の名前を --name で指定してください。")
+    # 季節の印（🍂26 など）を外した名前とも重ならないようにする（季節が変わっても同じ詩的な名前を使わない）
+    avoid_base = avoid | {seas.strip_season_tag(a) for a in avoid}
+    base = base or seas.make_title(season, mood, avoid_base, seed=f"{skey}-{len(runs)}")
+    name = seas.with_season_tag(base, seas.season_tag(today)) if opts["season_tag"] else base
+    # 季節の印を外した名前どうしで比べる（--name や保存した一覧の名前でも、同じ詩的な名前は使わない）
+    if seas.name_taken(name, avoid):
+        print(f"  「{seas.strip_season_tag(name)}」という名前は、もう使われています。別の名前を --name で指定してください。")
         return 1
     counts = {k: sum(1 for t in tracks if t["_source"] == k) for k in SOURCE_JA}
     description = (f"{today.year} {seas.SEASON_JA[season]} · {seas.MOOD_JA[mood]} · "
@@ -1646,12 +1708,17 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
         _print_track(i, t)
         print(f"         └ {SOURCE_JA[t['_source']]}" + (f"（{t['_why']}）" if t.get("_why") else ""))
 
-    _save_json(SEASONAL_PLAN_FILE, {
-        "created_at": now.isoformat(), "name": name, "description": description, "mood": mood,
-        "counts": counts, "tracks": [{k: t.get(k) for k in ("artist", "name", "uri", "_source", "_why")}
-                                     for t in tracks],
-    })
-    print(f"\n  一覧を {SEASONAL_PLAN_FILE} に保存しました。")
+    if not opts["from_plan"]:
+        _save_json(SEASONAL_PLAN_FILE, {
+            "created_at": now.isoformat(), "season_key": skey, "name": name, "base_name": base,
+            "description": description, "mood": mood,
+            # --from-plan で作る時に引き継ぐ、この時点のフォローの記録（フォロー一覧が読めた時だけ）
+            **({"follow_state": state["followed"], "followed_since": state.get("followed_since")}
+               if "followed" in state else {}),
+            "counts": counts, "tracks": [{k: t.get(k) for k in ("artist", "name", "uri", "_source", "_why")}
+                                         for t in tracks],
+        })
+        print(f"\n  一覧を {SEASONAL_PLAN_FILE} に保存しました（--from-plan で、この一覧のまま作れます）。")
 
     if opts["dry_run"]:
         print("  --dry-run のため、Spotify には作りません。")
@@ -1667,7 +1734,7 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     result = sp._post("me/playlists", payload={"name": name, "public": False, "description": description})
     uris = [t["uri"] for t in tracks]
     # 曲の追加の前に記録しておく（途中で失敗したら、次の実行がこのプレイリストに続きを入れる）
-    run = {"date": today.isoformat(), "at": now.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
+    run = {"date": run_at.date().isoformat(), "at": run_at.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
            "favorites": len(favorites), "recommendations": len(recs), "status": "creating", "uris": uris}
     runs.append(run)
     state["runs"] = runs
@@ -1748,7 +1815,7 @@ def cmd_help():
   preview [名]       生成済みプレイリスト確認
 
   seasonal [--yes] [--dry-run] [--size N] [--fav-ratio R] [--days N] [--name 名]
-           [--max-per-artist N]
+           [--max-per-artist N] [--from-plan] [--no-season-tag]
                      季節ごとの詩的なプレイリストを作る
                      (最近追加・最近リリース・最近フォローのお気に入り + おすすめ)
   login              フォロー一覧も読めるスコープでログインし直す
