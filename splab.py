@@ -1609,7 +1609,7 @@ def _seasonal_select(opts: dict, state: dict, runs: list, last: dict | None,
 def _seasonal_from_plan(skey: str):
     """dry-run で保存した一覧（data/seasonal_plan.json）を読む（Spotify の検索を使わない）.
 
-    (favorites, recs, tracks, mood, mood_score, base_name) か、使えない時は None.
+    (favorites, recs, tracks, mood, mood_score, base_name, plan) か、使えない時は None.
     """
     plan = _load_json(SEASONAL_PLAN_FILE, {})
     tracks = [t for t in plan.get("tracks", []) if t.get("uri")]
@@ -1627,7 +1627,7 @@ def _seasonal_from_plan(skey: str):
     mood = plan.get("mood") if plan.get("mood") in seas.MOOD_JA else "bright"
     base = plan.get("base_name") or seas.strip_season_tag(plan.get("name", "")) or None
     print(f"  {SEASONAL_PLAN_FILE}（{plan.get('created_at', '?')} に作成）の {len(tracks)} 曲を使います。")
-    return favorites, recs, tracks, mood, {}, base
+    return favorites, recs, tracks, mood, {}, base, plan
 
 
 def _seasonal_locked(opts: dict, interactive: bool) -> int:
@@ -1674,6 +1674,18 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     if picked is None:
         return 1
     favorites, recs, tracks, mood, mood_score = picked[:5]
+    # 実行の記録の時刻（次の回は、ここから後に追加・フォローしたものを選ぶ）
+    run_at = now
+    if opts["from_plan"]:
+        plan = picked[6]
+        # 曲を選んだのは一覧を保存した時なので、その時刻を記録する（そのあとに追加した曲を次の回に拾う）
+        if plan.get("created_at"):
+            run_at = datetime.fromisoformat(plan["created_at"])
+        # 一覧を保存した時のフォローの記録を引き継ぐ（次の季節に、同じアーティストを新しいフォローと数えない）
+        if "follow_state" in plan:
+            state["followed"] = plan["follow_state"]
+            if plan.get("followed_since"):
+                state["followed_since"] = plan["followed_since"]
 
     existing = _fetch_own_playlists()
     avoid = set(existing) | {r["name"] for r in runs}
@@ -1700,6 +1712,9 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
         _save_json(SEASONAL_PLAN_FILE, {
             "created_at": now.isoformat(), "season_key": skey, "name": name, "base_name": base,
             "description": description, "mood": mood,
+            # --from-plan で作る時に引き継ぐ、この時点のフォローの記録（フォロー一覧が読めた時だけ）
+            **({"follow_state": state["followed"], "followed_since": state.get("followed_since")}
+               if "followed" in state else {}),
             "counts": counts, "tracks": [{k: t.get(k) for k in ("artist", "name", "uri", "_source", "_why")}
                                          for t in tracks],
         })
@@ -1719,7 +1734,7 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     result = sp._post("me/playlists", payload={"name": name, "public": False, "description": description})
     uris = [t["uri"] for t in tracks]
     # 曲の追加の前に記録しておく（途中で失敗したら、次の実行がこのプレイリストに続きを入れる）
-    run = {"date": today.isoformat(), "at": now.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
+    run = {"date": run_at.date().isoformat(), "at": run_at.isoformat(), "season_key": skey, "name": name, "playlist_id": result["id"],
            "favorites": len(favorites), "recommendations": len(recs), "status": "creating", "uris": uris}
     runs.append(run)
     state["runs"] = runs
