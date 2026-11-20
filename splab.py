@@ -1387,7 +1387,7 @@ def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str],
     def _eligible(ranked: list[dict]) -> list[dict]:
         """アーティストの上限の残り（お気に入りで使った分を引く）に収まる候補だけを返す.
 
-        追加で探すかの判定と、Spotify で探す候補の絞り込みに使う。
+        類似アーティストを追加で探すかの判定に使う（Spotify で探す候補は削らない）。
         """
         if per_artist is None:
             return ranked
@@ -1449,12 +1449,15 @@ def _seasonal_recommendations(favorites: list[dict], followed_artists: set[str],
     except RateLimitError:
         print("  Last.fm のレート制限に達したので、ここまでの候補で選びます。")
 
-    ranked = _eligible(seas.rank_candidates(cands, liked_keys))
+    ranked = seas.rank_candidates(cands, liked_keys)
     print(f"  おすすめの候補: {len(ranked)} 曲 → Spotify で探します")
     out, seen = [], set()
     for c in ranked:
         if len(out) >= n:
             break
+        # もう上限に達したアーティストの候補は、検索しない（見つからなかった時は、次の候補を試せる）
+        if per_artist is not None and per.get(c["artist"].lower(), 0) >= per_artist:
+            continue
         track = _spotify_search_track(c["artist"], c["name"])
         time.sleep(0.15)
         if not track or track["id"] in liked_ids or track["id"] in seen:
