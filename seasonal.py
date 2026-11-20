@@ -33,6 +33,27 @@ def season_key(d: date) -> str:
     return f"{year}-{season_of(d)}"
 
 
+# タイトルの後ろに付ける季節の印（例: Rust & Rhythm 🍂26）
+SEASON_EMOJI = {"winter": "❄️", "spring": "🌸", "summer": "☀️", "autumn": "🍂"}
+_TAG_RE = re.compile(r"\s*(?:" + "|".join(re.escape(e) for e in SEASON_EMOJI.values()) + r")\d{2}$")
+
+
+def season_tag(d: date) -> str:
+    """季節の印. 冬（12〜2月）は始まった 12 月の年にする. 例: 🍂26（2026 秋）、❄️26（2026-12〜2027-02）."""
+    year = d.year - 1 if d.month in (1, 2) else d.year
+    return f"{SEASON_EMOJI[season_of(d)]}{year % 100:02d}"
+
+
+def strip_season_tag(name: str) -> str:
+    """名前の後ろの季節の印を外す（Rust & Rhythm 🍂26 → Rust & Rhythm）."""
+    return _TAG_RE.sub("", name).strip()
+
+
+def with_season_tag(name: str, tag: str) -> str:
+    """名前の後ろに季節の印を付ける（もう付いていれば付け直す）."""
+    return f"{strip_season_tag(name)} {tag}"
+
+
 # ── 日付 ──────────────────────────────────────────────
 
 

@@ -115,6 +115,21 @@ class PoolTest(unittest.TestCase):
         self.assertEqual([c["name"] for c in out], ["1", "2"])
 
 
+class SeasonTagTest(unittest.TestCase):
+    def test_season_tag(self):
+        self.assertEqual(seas.season_tag(date(2026, 11, 20)), "🍂26")
+        self.assertEqual(seas.season_tag(date(2026, 12, 1)), "❄️26")
+        self.assertEqual(seas.season_tag(date(2027, 2, 28)), "❄️26")  # 冬は始まった 12 月の年
+        self.assertEqual(seas.season_tag(date(2027, 3, 1)), "🌸27")
+        self.assertEqual(seas.season_tag(date(2027, 8, 31)), "☀️27")
+
+    def test_strip_and_with_tag(self):
+        self.assertEqual(seas.strip_season_tag("Rust & Rhythm 🍂26"), "Rust & Rhythm")
+        self.assertEqual(seas.strip_season_tag("Sunshine in Stereo"), "Sunshine in Stereo")
+        self.assertEqual(seas.with_season_tag("Rust & Rhythm", "🍂26"), "Rust & Rhythm 🍂26")
+        self.assertEqual(seas.with_season_tag("Rust & Rhythm 🍂26", "❄️26"), "Rust & Rhythm ❄️26")
+
+
 class TitleTest(unittest.TestCase):
     def test_mood(self):
         tracks = [T(1, tags=["rock", "hard rock"]), T(2, tags=["nu metal"]), T(3, tags=["pop"])]
