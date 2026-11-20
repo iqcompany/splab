@@ -130,6 +130,17 @@ class SeasonTagTest(unittest.TestCase):
         self.assertEqual(seas.with_season_tag("Rust & Rhythm 🍂26", "❄️26"), "Rust & Rhythm ❄️26")
 
 
+    def test_name_taken_ignores_tag(self):
+        existing = {"Rust & Rhythm 🍂26", "Sunshine in Stereo"}
+        # --name で、別の季節に同じ名前を指定した時
+        self.assertTrue(seas.name_taken(seas.with_season_tag("Rust & Rhythm", "🌸27"), existing))
+        # 保存した一覧の名前を、印なし（--no-season-tag）で使い直した時
+        self.assertTrue(seas.name_taken("rust & rhythm", existing))
+        # 印のない既存の名前に、印を付けた時
+        self.assertTrue(seas.name_taken("Sunshine in Stereo ☀️27", existing))
+        self.assertFalse(seas.name_taken("Thunder of Twilight 🍂26", existing))
+
+
 class TitleTest(unittest.TestCase):
     def test_mood(self):
         tracks = [T(1, tags=["rock", "hard rock"]), T(2, tags=["nu metal"]), T(3, tags=["pop"])]

@@ -49,6 +49,15 @@ def strip_season_tag(name: str) -> str:
     return _TAG_RE.sub("", name).strip()
 
 
+def name_taken(name: str, existing: set[str]) -> bool:
+    """name が existing のどれかと同じか（季節の印を外し、大文字小文字を無視して比べる）.
+
+    「Rust & Rhythm 🍂26」があれば、「Rust & Rhythm 🌸27」も「Rust & Rhythm」も使えない。
+    """
+    key = strip_season_tag(name).lower()
+    return any(strip_season_tag(e).lower() == key for e in existing)
+
+
 def with_season_tag(name: str, tag: str) -> str:
     """名前の後ろに季節の印を付ける（もう付いていれば付け直す）."""
     return f"{strip_season_tag(name)} {tag}"

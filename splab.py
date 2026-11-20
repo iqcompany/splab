@@ -1681,8 +1681,9 @@ def _seasonal_locked(opts: dict, interactive: bool) -> int:
     avoid_base = avoid | {seas.strip_season_tag(a) for a in avoid}
     base = base or seas.make_title(season, mood, avoid_base, seed=f"{skey}-{len(runs)}")
     name = seas.with_season_tag(base, seas.season_tag(today)) if opts["season_tag"] else base
-    if name.lower() in {a.lower() for a in avoid}:
-        print(f"  「{name}」はもうあります。別の名前を --name で指定してください。")
+    # 季節の印を外した名前どうしで比べる（--name や保存した一覧の名前でも、同じ詩的な名前は使わない）
+    if seas.name_taken(name, avoid):
+        print(f"  「{seas.strip_season_tag(name)}」という名前は、もう使われています。別の名前を --name で指定してください。")
         return 1
     counts = {k: sum(1 for t in tracks if t["_source"] == k) for k in SOURCE_JA}
     description = (f"{today.year} {seas.SEASON_JA[season]} · {seas.MOOD_JA[mood]} · "
