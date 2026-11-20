@@ -82,6 +82,23 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(big[:4], small)
         self.assertEqual(len(big), 8)
 
+    def test_pick_favorites_per_artist(self):
+        pools = {"added": [T(i, artist="X") for i in range(5)] + [T(9, artist="Y")],
+                 "released": [T(i, artist="X, Z") for i in range(5, 8)], "followed": []}
+        got = seas.pick_favorites(pools, {"added": 4, "released": 2, "followed": 0}, 6, per_artist=2)
+        # X は「X, Z」の曲も含めて 2 曲まで。足りない分は Y で埋める
+        self.assertEqual([t["id"] for t in got], ["id0", "id1", "id9"])
+        # ほかで選んだ曲（taken）も数に入る
+        got = seas.pick_favorites(pools, {"added": 4, "released": 0, "followed": 0}, 4, per_artist=2,
+                                  taken={"x": 1})
+        self.assertEqual([t["id"] for t in got], ["id0", "id9"])
+
+    def test_cap_per_artist(self):
+        tracks = [T(1, artist="X"), T(2, artist="Y"), T(3, artist="x"), T(4, artist="X, Y")]
+        self.assertEqual([t["id"] for t in seas.cap_per_artist(tracks, 2)], ["id1", "id2", "id3"])
+        self.assertEqual(len(seas.cap_per_artist(tracks, None)), 4)
+        self.assertEqual(seas.artist_counts(tracks), {"x": 3, "y": 1})
+
     def test_interleave(self):
         out = seas.interleave([1, 2, 3, 4], ["a", "b"])
         self.assertEqual(out, [1, "a", 2, 3, "b", 4])
